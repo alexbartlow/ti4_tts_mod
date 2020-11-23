@@ -1,0 +1,1363 @@
+--- Shared system (and generic resource/influence cards) helper object.
+-- @author GarnetBear added the original influence/resource list.
+-- @author Darrell June 2020 more attributes, planet positions.
+-- #include <~/CrLua/Objects/TI4_Helpers/TI4_SystemHelper>
+
+-- Users should copy this getHelperClient function, and use via:
+--
+-- local systemHelper = getHelperClient('TI4_SYSTEM_HELPER')
+-- local system = systemHelper.systemFromPosition({x,y,z})
+-- local cardNameToAttributes = systemHelper.nonPlanetResourceInfluenceCards()
+--
+-- Where one can call any main function in this file via the helper.
+function getHelperClient(helperObjectName)
+    local function getHelperObject()
+        for _, object in ipairs(getAllObjects()) do
+            if object.getName() == helperObjectName then return object end
+        end
+        error('missing object "' .. helperObjectName .. '"')
+    end
+    local helperObject = false
+    local function getCallWrapper(functionName)
+        helperObject = helperObject or getHelperObject()
+        if not helperObject.getVar(functionName) then error('missing ' .. helperObjectName .. '.' .. functionName) end
+        return function(parameters) return helperObject.call(functionName, parameters) end
+    end
+    return setmetatable({}, { __index = function(t, k) return getCallWrapper(k) end })
+end
+local _deckHelper = getHelperClient('TI4_DECK_HELPER')
+local _factionHelper = getHelperClient('TI4_FACTION_HELPER')
+local _zoneHelper = getHelperClient('TI4_ZONE_HELPER')
+
+-- Systems table, from guid to systems.
+--
+-- System attributes:
+-- - tile: number (0 for homebrew).
+-- - home: boolean, true if a home system.
+-- - planets: list of planet tables.
+-- - wormholes: list of strings.
+-- - anomalies: list of strings.
+-- - rotate: override, degrees number.
+-- - localY: override tile height (ghosts home system).
+-- - hyperlane: boolean, true if a hyperlane.
+--
+-- Planet attributes:
+-- - name: string.
+-- - resources: number.
+-- - influence: number.
+-- - trait: string {cultural|industrial|hazardous}.
+-- - tech: string {red|green|yellow|blue}.
+-- - position: table with {xz}: override, local space.
+-- - radius: number: override, local space.
+-- - legendary: boolean.
+--
+-- Also computed:
+-- - system.guid: tile GUID.
+-- - system.zoneEdgePositions: local edge positions carving per-planet zones.
+-- - system.planets[].position: local {xyz} position.
+-- - system.planets[].radius: local space.
+--
+local _systems = {
+    ['86e50a'] = { tile = 1, home = true, planets = {
+        { name = 'Jord', resources = 4, influence = 2 },
+    }},
+    ['ac3193'] = { tile = 2, home = true, planets = {
+        { name = 'Moll Primus', resources = 4, influence = 1 },
+    }},
+    ['db8aac'] = { tile = 3, home = true, planets = {
+        { name = 'Darien', resources = 4, influence = 4 },
+    }},
+    ['da7879'] = { tile = 4, home = true, planets = {
+        { name = 'Muaat', resources = 4, influence = 1 },
+    }},
+    ['fc6f7a'] = { tile = 5, home = true, planets = {
+        { name = 'Nestphar', resources = 3, influence = 2 },
+    }},
+    ['420355'] = { tile = 6, home = true, planets = {
+        { name = '[0.0.0]', resources = 5, influence = 0 },
+    }},
+    ['087347'] = { tile = 7, home = true, planets = {
+        { name = 'Winnu', resources = 3, influence = 4 },
+    }},
+    ['ea676a'] = { tile = 8, home = true, planets = {
+        { name = 'Mordai II', resources = 4, influence = 0 },
+    }},
+    ['0122f9'] = { tile = 9, home = true, planets = {
+        { name = 'Maaluuk', resources = 0, influence = 2 },
+        { name = 'Druaa', resources = 3, influence = 1 },
+    }},
+    ['e001b4'] = { tile = 10, home = true, planets = {
+        { name = 'Arc Prime', resources = 4, influence = 0 },
+        { name = 'Wren Terra', resources = 2, influence = 1 },
+    }},
+    ['d39876'] = { tile = 11, home = true, planets = {
+        { name = 'Lisis II', resources = 1, influence = 0 },
+        { name = 'Ragh', resources = 2, influence = 1 },
+    }},
+    ['11598c'] = { tile = 12, home = true, planets = {
+        { name = 'Nar', resources = 2, influence = 3 },
+        { name = 'Jol', resources = 1, influence = 2 },
+    }},
+    ['6176bf'] = { tile = 13, home = true, planets = {
+        { name = "Tren'Lak", resources = 1, influence = 0 },
+        { name = 'Quinarra', resources = 3, influence = 1 },
+    }},
+    ['c2509e'] = { tile = 14, home = true, planets = {
+        { name = 'Archon Ren', resources = 2, influence = 3 },
+        { name = 'Archon Tau', resources = 1, influence = 1 },
+    }},
+    ['9c373a'] = { tile = 15, home = true, planets = {
+        { name = 'Retillion', resources = 2, influence = 3 },
+        { name = 'Shalloq', resources = 1, influence = 2 },
+    }},
+    ['6a4247'] = { tile = 16, home = true, planets = {
+        { name = 'Hercant', resources = 1, influence = 1 },
+        { name = 'Arretze', resources = 2, influence = 0 },
+        { name = 'Kamdorn', resources = 0, influence = 1 },
+    }},
+    ['c56a8a'] = { tile = 17, home = true, wormholes = { 'delta' } }, -- not precisely a home, but tied to faction
+    ['04df02'] = { tile = 18, planets = {
+        { name = 'Mecatol Rex', resources = 1, influence = 6, radius = 1.7 },
+    }},
+    ['4216fd'] = { tile = 19, planets = {
+        { name = 'Wellon', resources = 1, influence = 2, trait = 'industrial', tech = 'yellow' },
+    }},
+    ['bc4bcc'] = { tile = 20, planets = {
+        { name = 'Vefut II', resources = 2, influence = 2, trait = 'hazardous' },
+    }},
+    ['f2798a'] = { tile = 21, planets = {
+        { name = 'Thibah', resources = 1, influence = 1, trait = 'industrial', tech = 'blue' },
+    }},
+    ['0ea77f'] = { tile = 22, planets = {
+        { name = "Tar'Mann", resources = 1, influence = 1, trait = 'industrial', tech = 'green' },
+    }},
+    ['7975f7'] = { tile = 23, planets = {
+        { name = 'Saudor', resources = 2, influence = 2, trait = 'industrial' },
+    }},
+    ['48cc9f'] = { tile = 24, planets = {
+        { name = 'Mehar Xull', resources = 1, influence = 3, trait = 'hazardous', tech = 'red' },
+    }},
+    ['71e1bf'] = { tile = 25, wormholes = { 'beta' }, planets = {
+        { name = 'Quann', resources = 2, influence = 1, trait = 'cultural' },
+    }},
+    ['f11ef5'] = { tile = 26, wormholes = { 'alpha' }, planets = {
+        { name = 'Lodor', resources = 3, influence = 1, trait = 'cultural' },
+    }},
+    ['fc239f'] = { tile = 27, planets = {
+        { name = 'New Albion', resources = 1, influence = 1, trait = 'industrial', tech = 'green' },
+        { name = 'Starpoint', resources = 3, influence = 1, trait = 'hazardous' },
+    }},
+    ['f8caf6'] = { tile = 28, planets = {
+        { name = "Tequ'Ran", resources = 2, influence = 0 , trait = 'hazardous'},
+        { name = 'Torkan', resources = 0, influence = 3, trait = 'cultural' },
+    }},
+    ['0ac98b'] = { tile = 29, planets = {
+        { name = "Qucen'n", resources = 1, influence = 2, trait = 'industrial' },
+        { name = 'Rarron', resources = 0, influence = 3, trait = 'cultural' },
+    }},
+    ['aaae9f'] = { tile = 30, planets = {
+        { name = 'Mellon', resources = 0, influence = 2, trait = 'cultural' },
+        { name = 'Zohbat', resources = 3, influence = 1, trait = 'hazardous' },
+    }},
+    ['d5ed63'] = { tile = 31, planets = {
+        { name = 'Lazar', resources = 1, influence = 0, trait = 'industrial', tech = 'yellow' },
+        { name = 'Sakulag', resources = 2, influence = 1, trait = 'hazardous' },
+    }},
+    ['48ac87'] = { tile = 32, planets = {
+        { name = 'Dal Bootha', resources = 0, influence = 2, trait = 'cultural' },
+        { name = 'Xxehan', resources = 1, influence = 1, trait = 'cultural' },
+    }},
+    ['87a5a2'] = { tile = 33, planets = {
+        { name = 'Corneeq', resources = 1, influence = 2, trait = 'cultural' },
+        { name = 'Resculon', resources = 2, influence = 0, trait = 'cultural' },
+    }},
+    ['eb99c0'] = { tile = 34, planets = {
+        { name = 'Centauri', resources = 1, influence = 3, trait = 'cultural' },
+        { name = 'Gral', resources = 1, influence = 1, trait = 'industrial', tech = 'blue' },
+    }},
+    ['dd2ca7'] = { tile = 35, planets = {
+        { name = 'Bereg', resources = 3, influence = 1, trait = 'hazardous' },
+        { name = 'Lirta IV', resources = 2, influence = 3, trait = 'hazardous' },
+    }},
+    ['a284d1'] = { tile = 36, planets = {
+        { name = 'Arnor', resources = 2, influence = 1, trait = 'industrial' },
+        { name = 'Lor', resources = 1, influence = 2, trait = 'industrial' },
+    }},
+    ['e0ff33'] = { tile = 37, planets = {
+        { name = 'Arinam', resources = 1, influence = 2, trait = 'industrial' },
+        { name = 'Meer', resources = 0, influence = 4, trait = 'hazardous', tech = 'red' },
+    }},
+    ['b958aa'] = { tile = 38, planets = {
+        { name = 'Abyz', resources = 3, influence = 0, trait = 'hazardous' },
+        { name = 'Fria', resources = 2, influence = 0, trait = 'hazardous' },
+    }},
+    ['0378a4'] = { tile = 39, wormholes = { 'alpha' } },
+    ['ccd7ac'] = { tile = 40, wormholes = { 'beta' } },
+    ['47a55d'] = { tile = 41, anomalies = { 'gravity rift' } },
+    ['d13aa2'] = { tile = 42, anomalies = { 'nebula'} },
+    ['dca098'] = { tile = 43, anomalies = { 'supernova' } },
+    ['cd58c7'] = { tile = 44, anomalies = { 'asteroid field' } },
+    ['7db8d8'] = { tile = 45, anomalies = { 'asteroid field' } },
+    ['9dce5a'] = { tile = 46 },
+    ['437f06'] = { tile = 47 },
+    ['ff8f60'] = { tile = 48 },
+    ['0216be'] = { tile = 49 },
+    ['97ee53'] = { tile = 50 },
+    ['f38182'] = { tile = 51, home = true, localY = 0.101, wormholes = { 'delta' }, planets = {
+        { name = 'Creuss', resources = 4, influence = 2, position = { x = -0.05, z = -0.4 }, radius = 0.8 },
+    }},
+
+    -- TI3 systems.
+    ['aa722a'] = { tile = 1001, planets = {
+        { name = 'Sem-Lore', resources = 3, influence = 2, trait = 'cultural', tech = 'yellow' }
+    }},
+    ['68ff91'] = { tile = 1002, planets = {
+        { name = 'Velnor', resources = 2, influence = 0, trait = 'cultural' }
+    }},
+    ['9e78a2'] = { tile = 1003, planets = {
+        { name = 'Tempesta', resources = 1, influence = 1, tech = 'blue' }
+    }},
+    ['8b7570'] = { tile = 1004, planets = {
+        { name = 'Lisis', resources = 2, influence = 2, trait = 'cultural' }
+    }},
+    ['c7664d'] = { tile = 1005, planets = {
+        { name = 'Mirage', resources = 1, influence = 2, trait = 'cultural' }
+    }},
+    ['59a527'] = { tile = 1006, planets = {
+        { name = 'Perimeter', resources = 2, influence = 2, trait = 'industrial' }
+    }},
+    ['683401'] = { tile = 1007, planets = {
+        { name = 'Faunus', resources = 1, influence = 3, trait = 'industrial', tech = 'green' }
+    }},
+    ['9e0a4a'] = { tile = 1008, planets = {
+        { name = "El'Nath", resources = 2, influence = 0, trait = 'industrial', tech = 'blue' }
+    }},
+    ['23c5e9'] = { tile = 1009, planets = {
+        { name = 'Capha', resources = 3, influence = 0, trait = 'hazardous' }
+    }},
+    ['73e4db'] = { tile = 1010, planets = {
+        { name = 'Garbozia', resources = 2, influence = 1, trait = 'hazardous' }
+    }},
+    ['ab3334'] = { tile = 1011, planets = {
+        { name = 'Lesab', resources = 2, influence = 1, trait = 'hazardous' }
+    }},
+    ['4e20b3'] = { tile = 1012, planets = {
+        { name = 'Industrex', resources = 2, influence = 0, trait = 'industrial', tech = 'red' }
+    }},
+    ['ce68ae'] = { tile = 1013, planets = {
+        { name = "Hope's End", resources = 3, influence = 0, trait = 'hazardous' }
+    }},
+    ['8b4ba2'] = { tile = 1014, planets = {
+        { name = 'Cormund', resources = 2, influence = 0, trait = 'cultural' },
+        anomalies = { 'nebula'}
+    }},
+    ['a682b7'] = { tile = 1015, planets = {
+        { name = 'Malice', resources = 0, influence = 2, trait = 'cultural', position = { x = -0.9, z = -0.4 } }
+    }},
+    ['35baa0'] = { tile = 1016, planets = {
+        { name = 'Everra', resources = 3, influence = 1, trait = 'cultural', position = { x = 0.7, z = -1.2 },
+        anomalies = { 'gravity rift'}
+    }
+    }},
+    ['ff5d4a'] = { tile = 1017, planets = {
+        { name = 'Vega Major', resources = 2, influence = 1, trait = 'industrial' },
+        { name = 'Vega Minor', resources = 1, influence = 2, trait = 'industrial' }
+    }},
+    ['950735'] = { tile = 1018, planets = {
+        { name = 'Hercalor', resources = 1, influence = 0, trait = 'hazardous', tech = 'yellow' },
+        { name = 'Tiamat', resources = 1, influence = 2, trait = 'cultural' }
+    }},
+    ['93ded7'] = { tile = 1019, planets = {
+        { name = 'Sumerian', resources = 2, influence = 2 },
+        { name = 'Arcturus', resources = 1, influence = 1, trait = 'hazardous' }
+    }},
+    ['091456'] = { tile = 1020, planets = {
+        { name = "Tsion", resources = 2, influence = 2 },
+        { name = 'Bellatrix', resources = 0, influence = 1, trait = 'industrial', tech = 'red' }
+    }},
+    ['0aafd9'] = { tile = 1021, planets = {
+        { name = 'Ashtroth', resources = 2, influence = 0, trait = 'hazardous' },
+        { name = 'Abaddon', resources = 1, influence = 0, trait = 'industrial' },
+        { name = 'Loki', resources = 1, influence = 2, trait = 'cultural' }
+    }},
+    ['cf3242'] = { tile = 1022, rotate = 60, planets = {
+        { name = 'Rigel I', resources = 0, influence = 1, tech = 'green' },
+        { name = 'Rigel II', resources = 1, influence = 2, trait = 'cultural' },
+        { name = 'Rigel III', resources = 1, influence = 1, trait = 'industrial' }
+    }},
+
+    -- Pick-A-Playent systems.
+    ['0dcdee'] = { tile = 2001, planets = {{ name = 'A' }} },
+    ['c68187'] = { tile = 2002, planets = {{ name = 'A' }} },
+    ['3c3949'] = { tile = 2003, planets = {{ name = 'A' }} },
+    ['8e69fb'] = { tile = 2004, planets = {{ name = 'A' }} },
+    ['75d1cd'] = { tile = 2005, planets = {{ name = 'A' }} },
+    ['ea61c5'] = { tile = 2006, planets = {{ name = 'A' }} },
+    ['8518e6'] = { tile = 2007, planets = {{ name = 'A' }} },
+    ['eda114'] = { tile = 2008, planets = {{ name = 'A' }} },
+    ['1300b8'] = { tile = 2009, planets = {{ name = 'A' }} },
+    ['fd8349'] = { tile = 2010, planets = {{ name = 'A' }} },
+    ['941405'] = { tile = 2011, planets = {{ name = 'A' }} },
+    ['ef89f5'] = { tile = 2012, planets = {{ name = 'A' }} },
+    ['eb1837'] = { tile = 2013, planets = {{ name = 'A' }} },
+    ['8e7edf'] = { tile = 2014, planets = {{ name = 'A' }} },
+    ['ffb0d9'] = { tile = 2015, planets = {{ name = 'A' }} },
+    ['26820b'] = { tile = 2016, planets = {{ name = 'A' }} },
+    ['9b66db'] = { tile = 2017, planets = {{ name = 'A' }} },
+    ['943567'] = { tile = 2018, planets = {{ name = 'A' }} },
+    ['ea6aa3'] = { tile = 2019, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['b81d49'] = { tile = 2020, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['042a91'] = { tile = 2021, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['3d388c'] = { tile = 2022, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['652379'] = { tile = 2023, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['636039'] = { tile = 2024, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['26d4e0'] = { tile = 2025, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['78011d'] = { tile = 2026, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['862968'] = { tile = 2027, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['a4a6bb'] = { tile = 2028, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['7679a9'] = { tile = 2029, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['ce4179'] = { tile = 2030, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['8ef29f'] = { tile = 2031, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['cfd3f1'] = { tile = 2032, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['cae6b7'] = { tile = 2033, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['ca6044'] = { tile = 2034, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['517d73'] = { tile = 2035, planets = {{ name = 'A' }, { name = 'B' }} },
+    ['8c22eb'] = { tile = 2036, planets = {{ name = 'A' }, { name = 'B' }} },
+
+    -- Tactic Blue homebrew factions
+    ['12d914'] = { tile = 3001, planets = {
+        { name = 'Nevermore', resources = 3, influence = 3 },
+    }},
+    ['975d0a'] = { tile = 3002, planets = {
+        { name = 'Arrakis', resources = 4, influence = 0 },
+    }},
+    ['2e10be'] = { tile = 3003, planets = {
+        { name = 'Khet', resources = 1, influence = 2 },
+        { name = 'Drakkol', resources = 3, influence = 0, position = { x = -0.75, z = 0.7 } },
+    }},
+    ['5dcca6'] = { tile = 3004, anomalies = { 'nebula' }, planets = {
+        { name = 'Rhune', resources = 3, influence = 4 },
+    }},
+    ['b69d23'] = { tile = 3005, planets = {
+        { name = 'Mandalore', resources = 3, influence = 2 },
+        { name = 'Concordia', resources = 1, influence = 1, position = { x = -0.75, z = 0.7 } },
+    }},
+    ['04c835'] = { tile = 3006, planets = {
+        { name = 'Refuge', resources = 1, influence = 3 },
+        { name = 'Kharak', resources = 1, influence = 0, position = { x = -0.75, z = 0.7 } },
+    }},
+    ['284942'] = { tile = 3007, planets = {
+        { name = 'Iodyn', resources = 1, influence = 1, position = { x = 1.35, z = -0.05 } },
+        { name = 'Kroll', resources = 0, influence = 1 },
+        { name = 'Cyrra', resources = 1, influence = 0 },
+    }},
+    ['dd9fd8'] = { tile = 3008, planets = {
+        { name = 'Klyutoss', resources = 2, influence = 5 },
+    }},
+    ['f67eca'] = { tile = 3009, planets = {
+        { name = 'Vorn', resources = 1, influence = 0 },
+        { name = 'Xyphen', resources = 3, influence = 1, position = { x = -0.75, z = 0.7 } },
+    }},
+    ['c3785f'] = { tile = 3010, planets = {
+        { name = 'Diphda', resources = 1, influence = 1, position = { x = 1.35, z = -0.05 } },
+        { name = 'Damocles', resources = 2, influence = 1 },
+        { name = 'Menkar', resources = 0, influence = 2 },
+    }},
+    ['108eb9'] = { tile = 3011, planets = {
+        { name = 'Ogdun', resources = 2, influence = 0 },
+        { name = 'Brthkul', resources = 1, influence = 2, position = { x = -0.75, z = 0.7 } },
+    }},
+    ['0db991'] = { tile = 3012, planets = {
+        { name = 'Pord', resources = 3, influence = 1 },
+    }},
+    ['7fe6fc'] = { tile = 3013, planets = {
+        { name = 'H-1', resources = 2, influence = 2 },
+        { name = 'H-2', resources = 2, influence = 0, position = { x = -0.75, z = 0.7 } },
+    }},
+    ['02254b'] = { tile = 3014, planets = {
+        { name = 'Gheldahr', resources = 5, influence = 0 },
+    }},
+    ['eab832'] = { tile = 3015, planets = {
+        { name = 'Kyr', resources = 1, influence = 0, position = { x = 1.35, z = -0.05 } },
+        { name = 'Pax', resources = 2, influence = 2 },
+        { name = 'Vess', resources = 1, influence = 0 },
+    }},
+    ['ff48e4'] = { tile = 3016, planets = {
+        { name = 'Sanctuary', resources = 4, influence = 2 },
+    }},
+    ['9e6138'] = { tile = 3017, planets = {
+        { name = 'Wod', resources = 3, influence = 1 },
+        { name = 'Lath', resources = 2, influence = 2, position = { x = -0.75, z = 0.7 } },
+    }},
+    ['6a667a'] = { tile = 3018, planets = {
+        { name = 'Cymiae', resources = 4, influence = 1 },
+    }},
+
+    -- Hybrid Franken hexes
+    ['80c8e6'] = { tile = 4001, planets = {
+        { name = "Tar'Mann", resources = 1, influence = 1, trait = 'industrial', tech = 'green' },
+        { name = 'Vefut II', resources = 2, influence = 2, trait = 'hazardous' },
+    }},
+    ['883887'] = { tile = 4002, planets = {
+        { name = 'Lisis', resources = 2, influence = 2, trait = 'cultural' },
+        { name = 'Thibah', resources = 1, influence = 1, trait = 'industrial', tech = 'blue' },
+    }},
+}
+
+local _nonPlanetResourceInfluenceCards = {
+    { name = 'Core Mining', resources = 2, influence = 0 },
+    { name = 'Terraforming Initiative', resources = 1, influence = 1 },
+    { name = 'Senate Sanctuary', resources = 0, influence = 2 },
+}
+
+local LOCAL_DISTANCE_TO_PLANET = 1.1
+local LOCAL_PLANET_RADIUS = 0.8
+local LOCAL_SYSTEM_TILE_RADIUS = 2.26
+local LOCAL_SYSTEM_TILE_Y = 0.08
+
+--- Get all systems.
+-- @return table: map from tile GUID to system table.
+function systems()
+    for guid, system in pairs(_systems) do
+        _fillMissingSystemData(guid, system)
+    end
+    return _systems
+end
+
+--- Get all planets.
+-- @return table: map from LOWERCASE planet name to planet table.
+function planets()
+    local result = {}
+    for _, system in pairs(_systems) do
+        for _, planet in ipairs(system.planets or {}) do
+            result[string.lower(planet.name)] = planet
+        end
+    end
+    return result
+end
+
+--- Get system at position.
+-- @param postition (table): {xyz} position.
+-- @return system table.
+function systemFromPosition(position)
+    assert(type(position) == 'table' and type(position.x) == 'number')
+    -- Ray cast not always reliable, use box.
+    local hits = Physics.cast({
+        origin = { x = position.x, y = position.y, z = position.z },
+        direction = { x = 0, y = -1, z = 0 },
+        type = 3, -- box
+        size = { 0.1, 10, 0.1 }
+    })
+    for _, hit in ipairs(hits) do
+        local guid = hit.hit_object.getGUID()
+        local system = _systems[guid]
+        if system then
+            _fillMissingSystemData(guid, system)
+            return system
+        end
+    end
+end
+
+--- Get system with the given tile number.
+-- @param tile (number).
+-- @return system table.
+function systemFromTile(tile)
+    for guid, system in pairs(_systems) do
+        if system.tile == tile then
+            _fillMissingSystemData(guid, system)
+            return system
+        end
+    end
+end
+
+--- Get system from tile guid.
+-- @param guid (string): system tile guid.
+-- @return system table.
+function systemFromGuid(guid)
+    local system = _systems[guid]
+    if system then
+        _fillMissingSystemData(guid, system)
+        return system
+    end
+end
+
+--- Get planet at position.
+-- Normally finds the closest planet after carving the system tile into zones,
+-- optionally require position to be inside planet radius (via params.exact).
+-- @params table: { systemGuid, position{xyz}, exact boolean }
+-- @return planet table.
+function planetFromPosition(params)
+    assert(type(params) == 'table')
+    local systemGuid = assert(params.systemGuid)
+    local position = assert(params.position)
+    local exact = params.exact
+    assert(type(systemGuid) == 'string')
+    assert(type(position) == 'table' and type(position.x) == 'number')
+    local system = _systems[systemGuid]
+    local best = false
+    if system then
+        local object = getObjectFromGUID(system.guid)
+        local p1 = object.positionToLocal(position)
+        local bestDistanceSq = false
+        for _, planet in ipairs(system.planets or {}) do
+            local p2 = assert(planet.position)
+            local distanceSq = (p1.x - p2.x) ^ 2 + (p1.z - p2.z) ^ 2
+            if not bestDistanceSq or distanceSq < bestDistanceSq then
+                best = planet
+                bestDistanceSq = distanceSq
+            end
+        end
+        if best and exact and math.sqrt(bestDistanceSq) > best.radius then
+            best = false
+        end
+    end
+    return best
+end
+
+--- Get map from wormhole type to object guids.
+-- @param playerColor (string) : player color or nil
+function wormholes(playerColor)
+    assert(not playerColor or type(playerColor) == 'string')
+    local result = {
+        ['alpha'] = {
+            guids = {},
+            connected = { 'alpha' }
+        },
+        ['beta'] = {
+            guids = {},
+            connected = { 'beta' }
+        },
+        ['delta'] = {
+            guids = {},
+            connected = { 'delta' }
+        },
+    }
+
+    local function addGuid(wormhole, guid)
+        table.insert(result[wormhole].guids, guid)
+    end
+
+    local function addConnection(src, dst)
+        for _, existing in ipairs(result[src].connected) do
+            if existing == dst then
+                return
+            end
+        end
+        table.insert(result[src].connected, dst)
+    end
+
+    -- Ghosts (or Franken with the ability) connect A/B.
+    local faction = playerColor and _factionHelper.fromColor(playerColor)
+    for _, ability in ipairs(faction and faction.abilities or {}) do
+        if ability == 'Quantum Entanglement' then
+            addConnection('alpha', 'beta')
+            addConnection('beta', 'alpha')
+        end
+    end
+
+    -- Non-system wormhole objects.
+    local objectNameToNonSystemWormholes = {
+        ['Alpha Wormhole Token'] = { 'alpha' },
+        ['Beta Wormhole Token'] = { 'beta' },
+        ['Hil Colish'] = { 'delta' },
+    }
+
+    for _, object in ipairs(getAllObjects()) do
+        if object.tag ~= 'Bag' then
+            local guid = object.getGUID()
+            local name = object.getName()
+
+            local system = _systems[guid]
+            local nonSystemWormholes = objectNameToNonSystemWormholes[name]
+
+            if system then
+                _fillMissingSystemData(guid, system)
+                for _, wormhole in ipairs(system.wormholes or {}) do
+                    addGuid(wormhole, guid)
+                end
+            elseif nonSystemWormholes then
+                for _, wormhole in ipairs(nonSystemWormholes) do
+                    addGuid(wormhole, guid)
+                end
+            end
+
+            if name == 'Wormhole Reconstruction' and (not object.is_face_down) and (not _deckHelper.isDiscard(guid)) then
+                addConnection('alpha', 'beta')
+                addConnection('beta', 'alpha')
+            end
+        end
+    end
+
+    return result
+end
+
+--- Get non-planet items that affect resources and/or influence.
+-- @return table: map from LOWERCASE object name to {name,resources,influence} table.
+function nonPlanetResourceInfluenceCards()
+    local result = {}
+    for _, item in ipairs(_nonPlanetResourceInfluenceCards) do
+        result[string.lower(item.name)] = item
+    end
+    return result
+end
+
+--- Let homebrew add custom systems via runtime injection.
+-- @param system: system table.
+function injectSystem(system)
+    assert(type(system) == 'table')
+
+    -- Unclear if the systems are shared with the caller, make a copy to be
+    -- sure any later mutations to the caller's version does not change this.
+    local function copyTable(t)
+        if t and type(t) == 'table' then
+            local copy = {}
+            for k, v in pairs(t) do
+                copy[k] = type(v) == 'table' and copyTable(v) or v
+            end
+            t = copy
+        end
+        return t
+    end
+    system = copyTable(system)
+
+    local guid = system.guid
+    if not guid or type(guid) ~= 'string' then
+        error('injectSystem: missing guid')
+    end
+    local success, errorMessage = _systemIsValid(system)
+    if not success then
+        error('injectSystem: ' .. guid .. ' ' .. errorMessage)
+    end
+    system.guid = nil  -- force rebuild of any auto-generated fields
+    system._homebrew = true
+    _systems[guid] = system
+
+    local object = getObjectFromGUID(guid)
+    if object then
+        object.clearContextMenu()
+        _addContextMenuItems(object)
+    end
+end
+
+function verifyAllSystems()
+    local errors = false
+    for guid, system in pairs(_systems) do
+        local success, errorMessage = _systemIsValid(system)
+        if not success then
+            errors = errors or {}
+            table.insert(errors, guid .. ': ' .. errorMessage)
+        end
+    end
+    if errors then
+        error('verifyAllSystems ' .. table.concat(errors, ', '))
+    end
+    print('verifyAllSystems: success')
+end
+
+--- Verify system follows expectations.
+-- @parameters table: system.
+-- @return success boolean, string error message.
+function _systemIsValid(system)
+    local tile = system.tile
+    if not tile or type(tile) ~= 'number' then
+        return false, 'system.tile must be a number (zero can be used for homebrew)'
+    end
+    local home = system.home
+    if home and type(home) ~= 'boolean' then
+        return false, 'system.home must be nil or a boolean'
+    end
+
+    local planets = system.planets
+    if planets and (type(planets) ~= 'table') then
+        return false, 'system.planets must be nil or a list'
+    elseif planets then
+        for _, planet in ipairs(planets) do
+            local name = planet.name
+            if not name or type(name) ~= 'string' or string.len(name) == 0 then
+                return false, 'planet.name must be a non-empty string'
+            end
+            local radius = planet.radius
+            if radius and (type(radius) ~= 'number' or radius <= 0) then
+                return false, 'planet.radius must be nil or a positive number'
+            end
+            local position = planet.position
+            if position and (type(position) ~= 'table' or type(position.x) ~= 'number' or type(position.x) ~= 'number') then
+                return false, 'planet.position must be nil or a local {x, z} table'
+            end
+            local resources = planet.resources
+            if resources and (type(resources) ~= 'number' or resources < 0) then
+                return false, 'planet.resources must be nil or a non-negative number'
+            end
+            local influence = planet.influence
+            if influence and (type(influence) ~= 'number' or influence < 0) then
+                return false, 'planet.influence must be nil or a non-negative number'
+            end
+            local tech = planet.tech
+            if tech and tech ~= 'red' and tech ~= 'green' and tech ~= 'yellow' and tech ~= 'blue' then
+                return false, 'planet.tech must be {red|green|yellow|blue}'
+            end
+            local trait = planet.trait
+            if trait and trait ~= 'cultural' and trait ~= 'industrial' and trait ~= 'hazardous' then
+                return false, 'planet.trait must be {cultural|industrial|hazardous}'
+            end
+            local legendary = planet.legendary
+            if legendary and (type(legendary) ~= 'boolean') then
+                return false, 'planet.legendary must be {true|false}'
+            end
+        end
+    end
+
+    local wormholes = system.wormholes
+    if wormholes then
+        if type(wormholes) ~= 'table' or not wormholes[1] then
+            return false, 'system.wormholes must be nil or a non-empty list'
+        end
+        for _, wormhole in ipairs(wormholes) do
+            if not type(wormhole) == 'string' or string.len(wormhole) == 0 then
+                return false, 'wormhole must be a non-empty string'
+            end
+        end
+    end
+
+    local anomalies = system.anomalies
+    if anomalies then
+        if type(anomalies) ~= 'table' or not anomalies[1] then
+            return false, 'system.anomalies must be nil or a non-empty list'
+        end
+        for _, anomaly in ipairs(anomalies) do
+            if not type(anomaly) == 'string' or string.len(anomaly) == 0 then
+                return false, 'anomaly must be a non-empty string'
+            end
+        end
+    end
+
+    return true
+end
+
+--- Get system as printable string (stored in system.string)
+-- @param system table.
+-- @return string.
+function _systemToString(system)
+    assert(type(system) == 'table' and system.tile)
+    local message = {
+        'System ' .. system.tile
+    }
+    for i, planet in ipairs(system.planets or {}) do
+        table.insert(message, i == 1 and ': ' or ', ')
+        table.insert(message, '“' .. planet.name .. '”')
+    end
+    return table.concat(message, '')
+end
+
+--- Convert local bearing coordinate to local XYZ.
+function _bearingToPosition(bearing, distance, y)
+    assert(type(bearing) == 'number' and 0 <= bearing and bearing < 360 and type(distance) == 'number')
+    local bearing = -bearing * math.pi / 180.0
+    return {
+        x = distance * math.sin(bearing),
+        y = y or 0,
+        z = -distance * math.cos(bearing)
+    }
+end
+
+--- Split a system into zones, one for each planet/wormhole.
+function _getZoneBorders(system)
+    assert(type(system) == 'table' and system.tile)
+    local numPlanets = system.planets and #system.planets or 0
+    local numWormholes = system.wormholes and #system.wormholes or 0
+    local numZones = numPlanets + numWormholes
+
+    -- The local coordinate space for a tile shows {x=1,z=1} to be lower left.
+    -- Set zone borders to track planets starting left going clockwise.
+    local zoneBorders
+    if numZones <= 1 then
+        zoneBorders = { 0, 360 }
+    elseif numZones == 2 then
+        zoneBorders = { 240, 60, 240 }
+    elseif numZones == 3 then
+        zoneBorders = { 210, 330, 90, 210 }
+    else
+        error(TAG .. ': too many zones (' .. numZones .. ')')
+    end
+
+    -- Support non-standard rotations (applies to a TI3 tile).
+    for i, v in ipairs(zoneBorders) do
+        zoneBorders[i] = (v + (system.rotate or 0)) % 360
+    end
+    return zoneBorders
+end
+
+--- Get planet location in local space.  Account for tile variations.
+function _planetPosition(system, zoneBorders, planetIndex)
+    assert(type(system) == 'table' and system.tile)
+    local planet = system.planets[planetIndex]
+    local localRadius = planet.radius or LOCAL_PLANET_RADIUS
+    local localY = system.localY or LOCAL_SYSTEM_TILE_Y
+
+    -- If planet already has a position, use it.
+    if planet.position then
+        return { x = planet.position.x, y = localY, z = planet.position.z }, localRadius
+    end
+
+    -- Compute the default bearing and distance.
+    local distanceToPlanet = 0
+    local bearingToPlanet = 0
+    if #zoneBorders > 2 then
+        local a = zoneBorders[planetIndex]
+        local b = zoneBorders[planetIndex + 1]
+        if a < b then
+            bearingToPlanet = (a + b) / 2
+        else
+            bearingToPlanet = ((a + 360 + b) / 2) % 360
+        end
+        distanceToPlanet = LOCAL_DISTANCE_TO_PLANET
+    end
+
+    -- Planets bearings are almost but not exactly in the center of their zones.
+    -- Home system planets are slightly offset.  Different same-number-of-planets
+    -- systems vary slightly, so unless want to hard code each tile this is close.
+    local numZones = #zoneBorders - 1
+    if numZones == 1 then
+        if system.home then
+            distanceToPlanet = 0.25
+            bearingToPlanet = 0
+        else
+            distanceToPlanet = 0.1
+            bearingToPlanet = 180
+        end
+    elseif numZones == 2 then
+        if planetIndex == 1 then
+            if system.home then
+                distanceToPlanet = distanceToPlanet - 0.05
+                bearingToPlanet = bearingToPlanet + 2
+            else
+                distanceToPlanet = distanceToPlanet - 0.17
+                bearingToPlanet = bearingToPlanet - 0
+            end
+        elseif planetIndex == 2 then
+            if system.home then
+                distanceToPlanet = distanceToPlanet - 0
+                bearingToPlanet = bearingToPlanet - 17
+            else
+                distanceToPlanet = distanceToPlanet - 0.07
+                bearingToPlanet = bearingToPlanet - 1
+            end
+        end
+    elseif numZones == 3 then
+        if planetIndex == 1 then  -- hercant
+            distanceToPlanet = distanceToPlanet + 0.1
+            bearingToPlanet = bearingToPlanet + 5
+        elseif planetIndex == 2 then
+            distanceToPlanet = distanceToPlanet + 0.01
+            bearingToPlanet = bearingToPlanet - 0
+        elseif planetIndex == 3 then
+            distanceToPlanet = distanceToPlanet + 0.22
+            bearingToPlanet = bearingToPlanet - 7
+        end
+    end
+
+    return _bearingToPosition(bearingToPlanet, distanceToPlanet, localY), localRadius
+end
+
+--- Fill in system fields (only done on the first access, then reused).
+function _fillMissingSystemData(guid, system)
+    assert(type(guid) == 'string' and type(system) == 'table' and system.tile)
+    if not system.guid then
+        system.guid = guid
+        system.string = _systemToString(system)
+        system.y = system.localY or LOCAL_SYSTEM_TILE_Y
+
+        -- Fill zone edge positions, points on edge diving per-planet zones.
+        local zoneBorders = _getZoneBorders(system)
+        if #zoneBorders > 2 then
+            system.zoneEdgePositions = {}
+            local r = LOCAL_SYSTEM_TILE_RADIUS
+            local y = system.localY or LOCAL_SYSTEM_TILE_Y
+            for i = 1, #zoneBorders - 1 do
+                local bearing = zoneBorders[i]
+                table.insert(system.zoneEdgePositions, _bearingToPosition(bearing, r, y))
+            end
+        end
+
+        -- Fill in local planet position, radius.
+        for i, planet in ipairs(system.planets or {}) do
+            planet.position, planet.radius = _planetPosition(system, zoneBorders, i)
+        end
+    end
+
+    -- If a system has face-up/face-down wormholes, reset wormholes based on state.
+    if system.faceUpWormholes or system.faceDownWormholes then
+        local systemObject = getObjectFromGUID(guid)
+        if systemObject then
+            system.wormholes = system.is_face_down and system.faceDownWormholes or system.faceUpWormholes
+        end
+    end
+end
+
+-------------------------------------------------------------------------------
+
+-- Heavily distilled hex math based on RedBlobGames excellent hex math.
+local _M = {
+    -- F matrix translates hex to position.
+    f0 = 3.0 / 2.0,
+    f1 = 0.0,
+    f2 = math.sqrt(3.0) / 2.0,
+    f3 = math.sqrt(3.0),
+    -- B matrix translates position to hex.
+    b0 = 2.0 / 3.0,
+    b1 = 0.0,
+    b2 = -1.0 / 3.0,
+    b3 = math.sqrt(3.0) / 3.0,
+    -- Angle to first corner (0 for flat top hex).
+    start_angle = 0.0
+}
+
+local _LAYOUT = {
+    size = { x = (Grid.sizeX or 7) / 2.0, z = (Grid.sizeY or 7) / 2.0 },
+    origin = { x = 0, z = 0 }
+}
+
+--- Get a hex id from a position.
+-- @param position table : {xyz} position.
+-- @return hex string.
+function hexFromPosition(position)
+    assert(type(position) == 'table')
+
+    -- Fractional hex position.
+    local p = {
+        x = (position.x - _LAYOUT.origin.x) / _LAYOUT.size.x,
+        z = (position.z - _LAYOUT.origin.z) / _LAYOUT.size.z
+    }
+    local q = _M.b0 * p.x + _M.b1 * p.z
+    local r = _M.b2 * p.x + _M.b3 * p.z
+    local s = -q - r
+
+    -- Round to grid aligned hex.
+    local qi = math.floor(0.5 + q)
+    local ri = math.floor(0.5 + r)
+    local si = math.floor(0.5 + s)
+    local q_diff = math.abs(qi - q)
+    local r_diff = math.abs(ri - r)
+    local s_diff = math.abs(si - s)
+    if q_diff > r_diff and q_diff > s_diff then
+        qi = -ri - si
+    else
+        if r_diff > s_diff then
+            ri = -qi - si
+        else
+            si = -qi - ri
+        end
+    end
+
+    return '<' .. qi .. ',' .. ri .. ',' .. si .. '>'
+end
+
+--- Bulk hexFromPosition.
+function hexesFromPositions(guidToPosition)
+    assert(type(guidToPosition) == 'table')
+    local result = {}
+    for guid, position in pairs(guidToPosition) do
+        result[guid] = hexFromPosition(position)
+    end
+    return result
+end
+
+--- Get a position from a hex.
+-- @param hex : hex encoded as string.
+-- @return table : position {xyz}.
+function hexToPosition(hex)
+    assert(type(hex) == 'string')
+    local q, r, s = string.match(hex, '<(%-?%d+),(%-?%d+),(%-?%d+)>')
+    assert(not (math.floor (0.5 + q + r + s) ~= 0), 'q + r + s must be 0')
+    local x = (_M.f0 * q + _M.f1 * r) * _LAYOUT.size.x
+    local z = (_M.f2 * q + _M.f3 * r) * _LAYOUT.size.z
+    return { x = x + _LAYOUT.origin.x, y = 0, z = z + _LAYOUT.origin.z }
+end
+
+--- Get clockwise winding corners about a hex.
+-- @param hex : hex encoded as string.
+-- @return table : list of {xyz} positions.
+function hexCorners(hex)
+    local center = hexToPosition(hex)
+    local function hexCornerOffset(corner)
+        local angle = 2.0 * math.pi * (_M.start_angle - corner) / 6.0
+        return {
+            x = center.x + _LAYOUT.size.x * math.cos(angle),
+            y = center.y,
+            z = center.z + _LAYOUT.size.z * math.sin(angle)
+        }
+    end
+    local corners = {}
+    for i = 0, 5 do
+        table.insert(corners, hexCornerOffset(i))
+    end
+    return corners
+end
+
+--- Get clockwise winding neighbors about a hex.
+-- @param hex : hex encoded as string.
+-- @return table : list of neighbor hex strings.
+function hexNeighbors(hex)
+    assert(type(hex) == 'string')
+    local q, r, s = string.match(hex, '<(%-?%d+),(%-?%d+),(%-?%d+)>')
+    local function makeHex(q, r, s)
+        return '<' .. q .. ',' .. r .. ',' .. s .. '>'
+    end
+    return {
+        makeHex(q + 1, r + 0, s - 1),
+        makeHex(q + 1, r - 1, s + 0),
+        makeHex(q + 0, r - 1, s + 1),
+        makeHex(q - 1, r + 0, s + 1),
+        makeHex(q - 1, r + 1, s + 0),
+        makeHex(q + 0, r + 1, s - 1)
+    }
+end
+
+--- Get wormhole-adjacent hexes.
+-- @param params : {hex=string, isGhosts=boolean} table.
+-- @return table : list of wormhole-adjacent hex strings.
+function hexAdjacentWormholes(params)
+    assert(type(params) == 'table')
+    assert(type(params.hex) == 'string')
+    assert(not params.playerColor or type(params.playerColor) == 'string')
+    local hex = params.hex
+
+    local wormholes = wormholes(params.playerColor)
+    local wormholesInThisHexSet = {}
+    local wormholeToHexSet = {}
+    for wormhole, state in pairs(wormholes) do
+        wormholeToHexSet[wormhole] = {}
+        for _, guid in ipairs(state.guids) do
+            local object = getObjectFromGUID(guid)
+            local wormholeHex = hexFromPosition(object.getPosition())
+            if hex == wormholeHex then
+                wormholesInThisHexSet[wormhole] = true
+            else
+                -- Only include wormholes in other hexes.
+                wormholeToHexSet[wormhole][wormholeHex] = true
+            end
+        end
+    end
+
+    local adjacentSet = {}
+    for wormhole, _ in pairs(wormholesInThisHexSet) do
+        for _, connected in ipairs(wormholes[wormhole].connected) do
+            for wormholeHex, _ in pairs(wormholeToHexSet[connected]) do
+                adjacentSet[wormholeHex] = true
+            end
+        end
+    end
+
+    local result = {}
+    for adjacentHex, _ in pairs(adjacentSet) do
+        if adjacentHex ~= hex then
+            table.insert(result, adjacentHex)
+        end
+    end
+    return result
+end
+
+-------------------------------------------------------------------------------
+
+local _activatedSystem = false
+local _lastActivatedSystem = false  -- rememeber even when turn changes
+
+--- Get the currently activated system.
+-- Objects may declare an 'onSystemActivation(system)' called on activation.
+function getActivatedSystem()
+    return _activatedSystem
+end
+
+function getLastActivatedSystem()
+    return _lastActivatedSystem
+end
+
+-------------------------------------------------------------------------------
+
+function _moveTokenFromReinforcements(systemObject, colors)
+    assert(type(systemObject) == 'userdata' and type(colors) == 'table')
+    local bagNameSet = {}
+    for _, color in ipairs(colors) do
+        local faction = _factionHelper.fromColor(color)
+        if faction then
+            bagNameSet[faction.tokenName .. ' Command Tokens Bag'] = true
+        end
+    end
+    local bags = {}
+    for _, object in ipairs(getAllObjects()) do
+        if object.tag == 'Bag' and bagNameSet[object.getName()] then
+            table.insert(bags, object)
+        end
+    end
+    local r = 1
+    local p0 = systemObject.getPosition()
+    local success = true
+    for i, bag in ipairs(bags) do
+        local phi = math.rad(360 * i / #bags)
+        if bag.getQuantity() > 0 then
+            bag.takeObject({
+                position = {
+                    x = p0.x + math.cos(phi) * r,
+                    y = p0.y + 3 + i * 0.2,
+                    z= p0.z + math.sin(phi) * r,
+                },
+                rotation = {
+                    x = 0,
+                    y = -math.deg(phi),
+                    z = 0
+                },
+                smooth = true,
+            })
+        else
+            broadcastToAll(bag.getName() .. ' empty, please assign token manually', 'Red')
+            success = false
+        end
+    end
+    return success
+end
+
+function _moveTokenFromCommandSheet(systemObject, color, section)
+    assert(type(systemObject) == 'userdata' and type(color) == 'string' and type(section) == 'string')
+    local faction = _factionHelper.fromColor(color)
+    local commandSheet = faction and getObjectFromGUID(faction.commandSheetGuid)
+    local commandTokenName = faction and faction.tokenName .. ' Command Token'
+    local function isToken(commandToken)
+        local p = commandSheet.positionToLocal(commandToken.getPosition())
+        local dSq = p.x * p.x + p.z * p.z
+        if dSq > 15 then
+            return false
+        end
+        local degrees = (math.deg(math.atan2(p.z, p.x)) + 360) % 360
+        if section == 'tactics' and 300 > degrees and degrees > 240 then
+            return true
+        elseif section == 'fleet' and 240 > degrees and degrees > 180 then
+            return true
+        elseif section == 'strategy' and 180 > degrees and degrees > 120 then
+            return true
+        end
+    end
+    local commandToken = false
+    if commandSheet and commandTokenName then
+        for _, object in ipairs(getAllObjects()) do
+            if object.getName() == commandTokenName and isToken(object) then
+                commandToken = object
+                break
+            end
+        end
+    end
+    local success = true
+    if commandToken then
+        -- Off-center, near the tile number.
+        local p0 = systemObject.positionToWorld({
+            x = 1.8,
+            y = 0,
+            z = 0
+        })
+        local position = {
+            x = p0.x,
+            y = p0.y + 3,
+            z = p0.z
+        }
+        local collide = false
+        local fast = false
+        commandToken.setPositionSmooth(position, collide, fast)
+    else
+        broadcastToAll(color .. ' ' .. section .. ' pool is empty', 'Red')
+        success = false
+    end
+    return success
+end
+
+function _moveOwnerToken(systemObject, color)
+    assert(type(systemObject) == 'userdata' and type(color) == 'string')
+    local faction = _factionHelper.fromColor(color)
+    local ownerTokensBagName = faction and faction.tokenName .. ' Owner Tokens Bag'
+    local ownerTokensBag = false
+    if ownerTokensBagName then
+        for _, object in ipairs(getAllObjects()) do
+            if object.tag == 'Infinite' and object.getName() == ownerTokensBagName then
+                ownerTokensBag = object
+                break
+            end
+        end
+    end
+    if ownerTokensBag then
+        -- Off-center, near the tile number.
+        local p0 = systemObject.positionToWorld({
+            x = 1.8,
+            y = 0,
+            z = 0
+        })
+        ownerTokensBag.takeObject({
+            position = {
+                x = p0.x,
+                y = p0.y + 3,
+                z = p0.z
+            },
+            smooth = true
+        })
+    end
+end
+
+function onClickDiplomacySystem(clickerColor, systemObject)
+    assert(type(clickerColor) == 'string' and type(systemObject) == 'userdata')
+    local system = _systems[systemObject.getGUID()]
+    printToAll(clickerColor .. ' applying Diplomacy to ' .. system.string)
+    local colors = {}
+    for _, faction in pairs(_factionHelper.allFactions()) do
+        if faction.color ~= clickerColor then
+            table.insert(colors, faction.color)
+        end
+    end
+    _moveTokenFromReinforcements(systemObject, colors)
+end
+
+function onClickActivateSystem(clickerColor, systemObject)
+    assert(type(clickerColor) == 'string' and type(systemObject) == 'userdata')
+    local system = _systems[systemObject.getGUID()]
+    -- No need to announce, activateSystem will do that.
+    if (not Turns.enable) or Turns.turn_color ~= clickerColor then
+        printToColor('Activate system: ' .. clickerColor .. ' is not the active player, ignoring', clickerColor, 'Red')
+        return
+    end
+    if _moveTokenFromCommandSheet(systemObject, clickerColor, 'tactics') then
+        activateSystem(clickerColor, system)
+    end
+end
+
+function onClickStrategyToken(clickerColor, systemObject)
+    assert(type(clickerColor) == 'string' and type(systemObject) == 'userdata')
+    local system = _systems[systemObject.getGUID()]
+    if _moveTokenFromCommandSheet(systemObject, clickerColor, 'strategy') then
+        printToAll(clickerColor .. ' placing command token from strategy in ' .. system.string)
+    end
+end
+
+function onClickReinforcementsToken(clickerColor, systemObject)
+    assert(type(clickerColor) == 'string' and type(systemObject) == 'userdata')
+    local system = _systems[systemObject.getGUID()]
+    if _moveTokenFromReinforcements(systemObject, { clickerColor }) then
+        printToAll(clickerColor .. ' placing command token from reinforcements in ' .. system.string)
+    end
+end
+
+function onClickOwnerToken(clickerColor, systemObject)
+    assert(type(clickerColor) == 'string' and type(systemObject) == 'userdata')
+    local system = _systems[systemObject.getGUID()]
+    _moveOwnerToken(systemObject, clickerColor)
+    printToAll(clickerColor .. ' placing owner token in ' .. system.string)
+end
+
+function _addContextMenuItems(systemObject)
+    assert(type(systemObject) == 'userdata')
+    assert(_systems[systemObject.getGUID()])
+    systemObject.addContextMenuItem('Activate System', function(clickerColor) onClickActivateSystem(clickerColor, systemObject) end, false)
+    systemObject.addContextMenuItem('Owner Token', function(clickerColor) onClickOwnerToken(clickerColor, systemObject) end, false)
+    systemObject.addContextMenuItem('Strategy Token', function(clickerColor) onClickStrategyToken(clickerColor, systemObject) end, false)
+    systemObject.addContextMenuItem('Reinforcements Tkn', function(clickerColor) onClickReinforcementsToken(clickerColor, systemObject) end, false)
+    systemObject.addContextMenuItem('Diplomacy System', function(clickerColor) onClickDiplomacySystem(clickerColor, systemObject) end, false)
+end
+
+function onObjectLeaveContainer(container, leaveObject)
+    if _systems[leaveObject.getGUID()] then
+        _addContextMenuItems(leaveObject)
+    end
+end
+
+-------------------------------------------------------------------------------
+
+function onLoad(saveState)
+    self.setColorTint({ r = 0.25, g = 0.25, b = 0.25 })
+    self.setScale({ x = 2, y = 0.01, z = 2 })
+    self.setName('TI4_SYSTEM_HELPER')
+    self.setDescription('Shared helper functions used by other objects, PLEASE LEAVE ON TABLE! This object is only visible to the black (GM) player.')
+
+    self.addContextMenuItem('Verify', verifyAllSystems)
+
+    -- Only the GM/black player can see this object.  Others can still interact!
+    local invisibleTo = {}
+    for _, color in ipairs(Player.getColors()) do
+        if color ~= 'Black' then
+            table.insert(invisibleTo, color)
+        end
+    end
+    self.setInvisibleTo(invisibleTo)
+
+    local function delayedAddContextMenuItems()
+        for _, object in ipairs(getAllObjects()) do
+            if _systems[object.getGUID()] then
+                _addContextMenuItems(object)
+            end
+        end
+    end
+    Wait.frames(delayedAddContextMenuItems, 9)
+end
+
+function onPlayerTurnEnd(player_color_end, player_color_next)
+    _activatedSystem = false
+end
+
+function onObjectDrop(playerColor, object)
+    if playerColor ~= Turns.turn_color then
+        return
+    end
+
+    local tokenName = string.match(object.getName(), '^(.*) Command Token')
+    if not tokenName then
+        return
+    end
+
+    -- In addition to "FACTION Command Token" accept "COLOR Command Token".
+    local faction = _factionHelper.fromTokenName(tokenName)
+    local matchesFaction = faction and faction.color == playerColor
+    local matchesColor = tokenName == playerColor
+    if (not matchesFaction) and (not matchesColor) then
+        return
+    end
+
+    local system = systemFromPosition(object.getPosition())
+    if not system then
+        return
+    end
+
+    activateSystem(playerColor, system)
+end
+
+function activateSystem(playerColor, system)
+    assert(type(playerColor) == 'string' and type(system) == 'table')
+
+    _fillMissingSystemData(system.guid, system)
+
+    _activatedSystem = system
+    _lastActivatedSystem = system
+
+    local faction = _factionHelper.fromColor(playerColor)
+    local factionName = (faction and faction.name) or playerColor
+    broadcastToAll(factionName .. ' activated ' .. system.string, playerColor)
+    local systemObject = getObjectFromGUID(system.guid)
+    systemObject.highlightOn(playerColor, 30)
+
+    -- Tell any interested parties.
+    local reportTo = {}
+    for _, object in ipairs(getAllObjects()) do
+        if object.getVar('onSystemActivation') then
+            table.insert(reportTo, object)
+        end
+    end
+    for i, object in ipairs(reportTo) do
+        -- Wrap each in a separate 'Wait' instance so if one fails the rest go ahead.
+        -- Since that is happening, also spread out over N frames.
+        Wait.frames(function() object.call('onSystemActivation', system) end, i)
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Index is only called when the key does not already exist.
+local _lockGlobalsMetaTable = {}
+function _lockGlobalsMetaTable.__index(table, key)
+    error('Accessing missing global "' .. tostring(key or '<nil>') .. '", typo?', 2)
+end
+function _lockGlobalsMetaTable.__newindex(table, key, value)
+    error('Globals are locked, cannot create global variable "' .. tostring(key or '<nil>') .. '"', 2)
+end
+setmetatable(_G, _lockGlobalsMetaTable)

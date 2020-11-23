@@ -1,0 +1,1106 @@
+-- TI4 Map Building Tool by Cruix
+-- @author Cruix
+-- @author Darrell (August 2020 update)
+
+-- Maps are stored in a string by their tile numbers,
+-- starting directly above Mecatol Rex and moving in
+-- a clockwise spiral.
+
+-- The map string MAY begin with "{#}" which sets the center system to tile #.
+
+-- Tiles are retrieved by their GUIDs, so any tiles that
+-- are deleted and replaced with a new GUID will need to
+-- have their information updated in System Helper.
+
+function getHelperClient(helperObjectName)
+    local function getHelperObject()
+        for _, object in ipairs(getAllObjects()) do
+            if object.getName() == helperObjectName then return object end
+        end
+        error('missing object "' .. helperObjectName .. '"')
+    end
+    -- Nested tables are considered cross script.  Make a local copy.
+    local function copyTable(t)
+        if t and type(t) == 'table' then
+            local copy = {}
+            for k, v in pairs(t) do
+                copy[k] = type(v) == 'table' and copyTable(v) or v
+            end
+            t = copy
+        end
+        return t
+    end
+    local helperObject = false
+    local function getCallWrapper(functionName)
+        helperObject = helperObject or getHelperObject()
+        if not helperObject.getVar(functionName) then error('missing ' .. helperObjectName .. '.' .. functionName) end
+        return function(parameters) return copyTable(helperObject.call(functionName, parameters)) end
+    end
+    return setmetatable({}, { __index = function(t, k) return getCallWrapper(k) end })
+end
+local _systemHelper = getHelperClient('TI4_SYSTEM_HELPER')
+local _zoneHelper = getHelperClient('TI4_ZONE_HELPER')
+local _deckHelper = getHelperClient('TI4_DECK_HELPER')
+
+local INPUT_LABEL_MAP_STRING = "Enter map string or press 'save' to save the current map"
+local SLICE_DATALABEL_NAME = "slice_data_label"
+local MECATOL_TILE = 18
+local TILE_LIMIT = 1000  -- full 4 ring map is 61, 8 is 217
+
+local CUSTODIANS_TOKEN_GUID = '70642f'
+
+-- Check these first when looking for tiles.  Otherwise look in SYSTEM_BAG_GUIDS.
+local RED_BAG_GUID = '14a45f'
+local BLUE_BAG_GUID = '69311f'
+
+local SYSTEM_BAG_GUIDS = {
+    RED_BAG_GUID,
+    BLUE_BAG_GUID,
+    "a9f343",  -- Hybrid Franken hexes
+    "223e51",  -- Alister systems
+    "f69885",  -- Pick-a-planet
+    "cb9a22",  -- TI3 systems
+    "b0899d",  -- hyperlanes
+}
+
+local _mapString = false
+
+-- Remember which tiles got cloned for repeated map string entries.
+local _tileClonesGuidSet = {}
+local _hasCloneMenuGuidSet = {}
+
+local _clones = false
+
+-------------------------------------------------------------------------------
+
+-- Expose a function for outsiders (and self) to set the map string.
+function setMapString(mapString)
+    assert(type(mapString) == 'string')
+
+    -- Update visible string (would be nice to have a stable id for lookup).
+    for _, input in ipairs(self.getInputs() or {}) do
+        if input.label == INPUT_LABEL_MAP_STRING then
+            input.value = mapString
+            self.editInput(input)
+        end
+    end
+
+    broadcastToAll('Setting map string to ' .. mapString)
+    _mapString = mapString
+end
+
+-- Expose a function for outsiders (and self) to read the map string.
+function getMapString()
+    return _mapString or ''
+end
+
+-------------------------------------------------------------------------------
+
+function onLoad(saveState)
+    createInputs()
+
+    self.addContextMenuItem('Toggle Alt HS Pos', toggleAltHomeSystemPositions)
+    self.addContextMenuItem('Add Clone To Tiles', addCloneMenuOptionToSystemTiles)
+
+    -- If any clones are still on the table, add them to the systems table.
+    _clones = (saveState and string.len(saveState) > 0 and JSON.decode(saveState)) or {}
+    for _, clone in ipairs(_clones) do
+        if getObjectFromGUID(clone.guid) then
+            _systemHelper.injectSystem(clone)
+        end
+    end
+    if #_clones > 0 then
+        print('Map tool: registering ' .. (#_clones) .. ' cloned system tiles')
+    end
+end
+
+function onSave()
+    -- Only save clones still on table.
+    local activeClones = {}
+    for _, clone in ipairs(_clones) do
+        if getObjectFromGUID(clone.guid) then
+            table.insert(activeClones, clone)
+        end
+    end
+    return JSON.encode(activeClones)
+end
+
+-------------------------------------------------------------------------------
+
+function onObjectDestroy(dyingObject)
+    _hasCloneMenuGuidSet[dyingObject.getGUID()] = nil
+end
+
+function addCloneMenuOptionToSystemTiles()
+    local guidToSystem = _systemHelper.systems()
+    for _, object in ipairs(getAllObjects()) do
+        local guid = object.getGUID()
+        local system = guidToSystem[guid]
+        if system and not _hasCloneMenuGuidSet[guid] then
+            local function cloneSystemTile()
+                local position = object.getPosition()
+                position.y = position.y + 5
+                local rotation = object.getRotation()
+                _cloneSystem(system, position, rotation, false)
+            end
+            object.addContextMenuItem('Clone System Tile', cloneSystemTile)
+            _hasCloneMenuGuidSet[guid] = true
+        end
+    end
+end
+
+function toggleAltHomeSystemPositions()
+    _zoneHelper.toggleAltHomeSystemsPositions()
+    _zoneHelper.drawBordersVectorLines({})
+end
+
+-------------------------------------------------------------------------------
+
+function createInputs()
+    local buttonY = 0.2
+    local buttonWidthMajor = 435
+    local buttonWidthMinor = 100
+    local buttonHeightMajor = 200
+    local buttonHeightMinor = 100
+    local fontSizeMajor = 100
+    local fontSizeMinor = 60
+    local majorX = 0.9
+
+    self.createInput({
+        input_function = 'onInputMapString',
+        function_owner = self,
+        value          = 0,
+        alignment      = 4,
+        position       = {x=0, y=buttonY, z=-0.2},
+        width          = 1250,
+        height         = 250,
+        font_size      = fontSizeMinor,
+        validation     = 1,
+        alignment      = 2,
+        value          = '',
+        label          = INPUT_LABEL_MAP_STRING
+    })
+    self.createButton({
+        click_function = 'onButtonBuild',
+        function_owner = self,
+        label          = 'Build',
+        position       = {x=0, y=buttonY, z=0.33},
+        width          = buttonWidthMajor,
+        height         = buttonHeightMajor,
+        font_size      = fontSizeMajor,
+    })
+    self.createButton({
+        click_function = 'onButtonSave',
+        function_owner = self,
+        label          = 'Save',
+        position       = {x=0, y=buttonY, z=0.75},
+        width          = buttonWidthMajor,
+        height         = buttonHeightMajor,
+        font_size      = fontSizeMajor,
+    })
+    self.createButton({
+        click_function = 'onButtonPlaceCards',
+        function_owner = self,
+        label          = 'Place Cards',
+        position       = {x=-majorX, y=buttonY, z=0.33},
+        width          = buttonWidthMajor,
+        height         = buttonHeightMajor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'onButtonReturnCards',
+        function_owner = self,
+        label          = 'Return Cards',
+        position       = {x=-majorX, y=buttonY, z=0.75},
+        width          = buttonWidthMajor,
+        height         = buttonHeightMajor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'onButtonClearTiles',
+        function_owner = self,
+        label          = 'Clear',
+        position       = {x=majorX, y=buttonY, z=0.75},
+        width          = buttonWidthMajor,
+        height         = buttonHeightMajor,
+        font_size      = fontSizeMajor,
+    })
+    self.createButton({
+        click_function = 'onButtonDrawLines',
+        function_owner = self,
+        label          = 'Draw\nLines',
+        position       = {x=majorX, y=buttonY, z=-0.75},
+        width          = buttonWidthMajor,
+        height         = buttonHeightMajor,
+        font_size      = fontSizeMinor,
+    })
+
+    local countZ = -0.65
+    self.createButton({
+        click_function = 'count_slices3',
+        function_owner = self,
+        label          = '3p',
+        position       = {x=-1.2, y=buttonY, z=countZ},
+        width          = buttonWidthMinor,
+        height         = buttonHeightMinor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'count_slices4',
+        function_owner = self,
+        label          = '4p',
+        position       = {x=-1, y=buttonY, z=countZ},
+        width          = buttonWidthMinor,
+        height         = buttonHeightMinor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'count_slices5',
+        function_owner = self,
+        label          = '5p',
+        position       = {x=-0.8, y=buttonY, z=countZ},
+        width          = buttonWidthMinor,
+        height         = buttonHeightMinor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'count_slices6',
+        function_owner = self,
+        label          = '6p',
+        position       = { x=-0.6, y=buttonY, z=countZ},
+        width          = buttonWidthMinor,
+        height         = buttonHeightMinor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'count_slices7',
+        function_owner = self,
+        label          = '7p',
+        position       = { x=-0.4, y=buttonY, z=countZ},
+        width          = buttonWidthMinor,
+        height         = buttonHeightMinor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'count_slices8',
+        function_owner = self,
+        label          = '8p',
+        position       = { x=-0.2, y=buttonY, z=countZ},
+        width          = buttonWidthMinor,
+        height         = buttonHeightMinor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'clear_slicelabels',
+        function_owner = self,
+        label          = 'Clear',
+        position       = {x=0.06, y=buttonY, z=countZ},
+        width          = 160,
+        height         = buttonHeightMinor,
+        font_size      = fontSizeMinor,
+    })
+    self.createButton({
+        click_function = 'pass',
+        function_owner = self,
+        label          = 'Count Resources',
+        position       = {x=-0.85, y=buttonY, z=-0.85},
+        width          = 0,
+        height         = 0,
+        font_size      = fontSizeMinor,
+    })
+end
+
+function pass() end
+
+-------------------------------------------------------------------------------
+-- Map building stuff
+-------------------------------------------------------------------------------
+
+function onInputMapString(_, _, input)
+    _mapString = input
+end
+
+function onButtonBuild(_, color)
+    startLuaCoroutine(self, 'placeTilesCoroutine')
+end
+
+function placeTilesCoroutine()
+    local mapString = getMapString()
+    broadcastToAll('Building map from string: ' .. mapString)
+
+    local buildList = parseMapString(mapString)
+
+    -- Build a map from tile number to system.
+    local guidToSystem = _systemHelper.systems()
+    local tileToSystem = {}
+    for _, system in pairs(guidToSystem) do
+        tileToSystem[system.tile] = system
+    end
+
+    -- Build a map from system guid to container.
+    local systemGuidToBag = {}
+    for _, bagGuid in ipairs(SYSTEM_BAG_GUIDS) do
+        local bag = getObjectFromGUID(bagGuid)
+        if bag and bag.tag == 'Bag' then
+            for _, entry in ipairs(bag.getObjects()) do
+                if not systemGuidToBag[entry.guid] then
+                    systemGuidToBag[entry.guid] = bag
+                end
+            end
+        end
+    end
+    coroutine.yield(0)
+
+    local dy = 0.3
+    local positionIterator = getSystemPositionsStartingAtOriginIterator(dy)
+
+    local placedTileSet = {}
+
+    for i, buildEntry in ipairs(buildList) do
+        local position = positionIterator()
+        local tile, ab, rotation = buildEntry.tile, buildEntry.ab, buildEntry.rotation
+        if rotation then
+            rotation = { x = 0, y = rotation * 60, z = ab == 'B' and 180 or 0 }
+        else
+            rotation = { x = 0, y = 180, z = 0 }
+        end
+        if tile ~= 0 then
+            local system = tileToSystem[tile]
+            if system and not system.home then
+                if placedTileSet[tile] then
+                    _cloneSystem(system, position, rotation, true)
+                else
+                    placedTileSet[tile] = true
+                    local bag = systemGuidToBag[system.guid]
+                    placeTile(system, bag, position, rotation)
+                end
+            else
+                broadcastToAll('unknown system tile ' .. tile, 'Red')
+            end
+            coroutine.yield(0)
+        end
+    end
+    return 1
+end
+
+local function delayedLock(object)
+    local function doLock(object)
+        object.setLock(true)
+        object.use_hands = false
+    end
+    Wait.time(function() doLock(object) end, 3)
+end
+
+function placeTile(system, bag, position, rotation, ab)
+    assert(type(system) == 'table' and (not bag or type(bag) == 'userdata'))
+    assert(type(position) == 'table' and type(rotation) == 'table')
+
+    local object = false
+    if bag then
+        object = bag.takeObject({
+            position          = position,
+            rotation          = rotation,
+            callback_function = delayedLock,
+            smooth            = true,
+            guid              = system.guid
+        })
+        assert(object)
+    else
+        -- Look on table for object.
+        object = getObjectFromGUID(system.guid)
+        object.setLock(false)
+        if object then
+            local collide = false
+            local fast = true
+            object.setPositionSmooth(position, collide, fast)
+            object.setRotationSmooth(rotation, collide, fast)
+            delayedLock(object)
+        else
+            broadcastToAll('cannot find system tile for ' .. system.string, 'Red')
+        end
+    end
+end
+
+function _cloneSystem(system, position, rotation, lock)
+    assert(type(system) == 'table' and type(position) == 'table' and type(rotation) == 'table' and type(lock) == 'boolean')
+    local primary = assert(getObjectFromGUID(system.guid))
+
+    -- Clone the system tile object.
+    local clone = primary.clone({
+        position = {
+            x = position.x,
+            y = position.y + 3,
+            z = position.z
+        },
+        snap_to_grid = true,
+    })
+    clone.setLock(false)
+    local collide = false
+    local fast = true
+    clone.setPositionSmooth(position, collide, fast)
+    clone.setRotationSmooth(rotation, collide, fast)
+    if lock then
+        delayedLock(clone)
+    end
+
+    local function cloneReady()
+        return clone.getGUID() ~= system.guid
+    end
+
+    local function injectClone()
+        _tileClonesGuidSet[clone.getGUID()] = true
+
+        -- Add to system helper.  Keep the same tile number for map string generation.
+        local clonedSystem = {}
+        for k, v in pairs(system) do
+            if k == 'guid' then
+                clonedSystem.guid = clone.getGUID()
+            else
+                clonedSystem[k] = v
+            end
+        end
+        table.insert(_clones, clonedSystem)
+        _systemHelper.injectSystem(clonedSystem)
+    end
+
+    Wait.condition(injectClone, cloneReady)
+end
+
+function onButtonClearTiles(_, color)
+    startLuaCoroutine(self, 'clearTilesCoroutine')
+end
+
+function clearTilesCoroutine()
+    broadcastToAll('Returning tiles')
+    local redBag = getObjectFromGUID(RED_BAG_GUID)
+    local blueBag = getObjectFromGUID(BLUE_BAG_GUID)
+    if redBag == nil then
+        broadcastToAll('Cannot find red planet tiles bag')
+    end
+    if blueBag == nil then
+        broadcastToAll('Cannot find blue planet tiles bag')
+    end
+    for system, object in pairs(getPlacedSystemToObject()) do
+        local guid = object.getGUID()
+        if _tileClonesGuidSet[guid] then
+            _tileClonesGuidSet[guid] = nil
+            _safeDestroyObject(object)
+        elseif not system.home then
+            local p = object.getPosition()
+            local d = math.abs(p.x + p.z)
+            if (not system.tile == 18) or d > 1 then
+                local hasPlanets = system.planets and #system.planets > 0
+                local bag = hasPlanets and blueBag or redBag
+                object.setLock(false)
+                object.use_hands = true
+                bag.putObject(object)
+            end
+        end
+        coroutine.yield(0)
+    end
+    return 1
+end
+
+-------------------------------------------------------------------------------
+-- Map saving stuff
+-------------------------------------------------------------------------------
+
+function onButtonSave(_, color)
+    broadcastToAll('Saving map')
+    startLuaCoroutine(self, 'saveTilesCoroutine')
+end
+
+function saveTilesCoroutine()
+    -- Get tile numbers and positions, convert to hexes.
+    local systemToObject = getPlacedSystemToObject()
+    local guidToTile = {}
+    local guidToPosition = {}
+    for system, object in pairs(systemToObject) do
+        local guid = assert(system.guid)
+        local tile = system.tile
+        if system.hyperlane then
+            tile = tile .. (object.is_face_down and 'B' or 'A')
+            tile = tile .. math.floor((tile.getRotation().y / 60) + 0.5)
+        end
+        guidToTile[guid] = assert(system.tile)
+        guidToPosition[guid] = object.getPosition()
+    end
+    local guidToHex = _systemHelper.hexesFromPositions(guidToPosition)
+    coroutine.yield(0)
+
+    -- Fill map from hex to map string index.
+    local indexToPosition = {}
+    local positionIterator = getSystemPositionsStartingAtOriginIterator()
+    for _ = 1, TILE_LIMIT do
+        table.insert(indexToPosition, assert(positionIterator()))
+    end
+    local indexToHex = _systemHelper.hexesFromPositions(indexToPosition)
+    local hexToMapStringIndex = {}
+    for i, hex in ipairs(indexToHex) do
+        hexToMapStringIndex[hex] = i
+    end
+    coroutine.yield(0)
+
+    -- Merge in a table (not a list, might have holes!)
+    local result = {}
+    local maxIndex = 0
+    for guid, hex in pairs(guidToHex) do
+        local index = assert(hexToMapStringIndex[hex], 'missing hex ' .. hex)
+        local tile = assert(guidToTile[guid], 'missing tile ' .. guid)
+        if index and tile then
+            result[index] = tile
+            maxIndex = math.max(maxIndex, index)
+        end
+    end
+    coroutine.yield(0)
+
+    -- Make it a list (fill in any holes with zeros).
+    for i = 1, maxIndex do
+        if not result[i] then
+            result[i] = 0
+        end
+    end
+    coroutine.yield(0)
+
+    -- If the center tile is Mecatol remove it, otherwise do special encoding.
+    if #result > 0 then
+        if result[1] == MECATOL_TILE then
+            table.remove(result, 1)
+        else
+            result[1] = '{' .. result[1] .. '}'
+        end
+    end
+
+    setMapString(table.concat(result, ' '))
+    return 1
+end
+
+-------------------------------------------------------------------------------
+-- Card stuff
+-------------------------------------------------------------------------------
+
+function onButtonPlaceCards(_, color)
+    startLuaCoroutine(self, 'placeCardsCoroutine')
+end
+
+local function getPlanetNameToCardOrDeckAndEntryGuid()
+    local planetNameSet = {}
+    for _, planet in pairs(_systemHelper.planets()) do
+        planetNameSet[planet.name] = true
+    end
+
+    local planetNameToCardOrDeckAndEntryGuid = {}
+    local extras = {}
+
+    local function addResult(name, value)
+        if planetNameToCardOrDeckAndEntryGuid[name] then
+            -- Already have this planet.
+            table.insert(extras, value)
+        else
+            planetNameToCardOrDeckAndEntryGuid[name] = value
+        end
+    end
+
+    for _, object in ipairs(getAllObjects()) do
+        local name = object.getName()
+        if object.tag == 'Card' and planetNameSet[name] then
+            addResult(name, {
+                card = object,
+                deck = false,
+                entryGuid = false
+            })
+        elseif object.tag == 'Deck' then
+            for _, entry in ipairs(object.getObjects()) do
+                if planetNameSet[entry.name] then
+                    addResult(entry.name, {
+                        card = false,
+                        deck = object,
+                        entryGuid = entry.guid
+                    })
+                end
+            end
+        end
+    end
+    return planetNameToCardOrDeckAndEntryGuid, extras
+end
+
+function placeCardsCoroutine()
+    broadcastToAll('Placing planet cards')
+
+    -- Find all card locations in a single pass, then place cards.
+    local planetNameToCardOrDeckAndEntryGuid = getPlanetNameToCardOrDeckAndEntryGuid()
+    coroutine.yield(0)
+
+    -- Make sure system tiles are locked, and no longer drawable into hands.
+    for system, object in pairs(getPlacedSystemToObject()) do
+        object.use_hands = false
+        object.setLock(true)
+    end
+
+    -- Build a map from planet name to positionS plural, in case repeated.
+    local planetToTransforms = {}
+    for system, object in pairs(getPlacedSystemToObject()) do
+        if not system.home then
+            for _, planet in ipairs(system.planets or {}) do
+                local entry = planetToTransforms[planet.name]
+                if not entry then
+                    entry = {}
+                    planetToTransforms[planet.name] = entry
+                end
+                local pos = object.positionToWorld(planet.position)
+                local rot = object.getRotation()
+                table.insert(entry, {
+                    position = { x = pos.x, y = pos.y + 3, z = pos.z },
+                    rotation = { x = rot.x, y = rot.y, z = 180 }
+                })
+            end
+        end
+    end
+
+    -- Place cards.
+    for planetName, transforms in pairs(planetToTransforms) do
+        local cardOrDeckAndEntryGuid = planetNameToCardOrDeckAndEntryGuid[planetName]
+        if cardOrDeckAndEntryGuid then
+            local card = cardOrDeckAndEntryGuid.card
+            local deck = cardOrDeckAndEntryGuid.deck
+            local entryGuid = cardOrDeckAndEntryGuid.entryGuid
+            for i, transform in ipairs(transforms) do
+                local pos = transform.position
+                local rot = transform.rotation
+                if i == 1 then
+                    -- The first time placing a planet get it from the source.
+                    card = placeCard(pos, rot, card, deck, entryGuid)
+                    deck = false
+                    entryGuid = false
+                else
+                    -- Make clones for extra copies.
+                    assert(card and card.tag == 'Card')
+                    local clone = card.clone({
+                        position     = pos,
+                        snap_to_grid = false,
+                    })
+                    local collide = false
+                    local fast = true
+                    clone.setRotationSmooth(rot, collide, fast)
+                end
+                coroutine.yield(0)
+            end
+        else
+            broadcastToAll('Missing card for "' .. planet.name .. '"', 'Red')
+        end
+    end
+
+    -- Lift the custudians token.
+    local custodiansToken = getObjectFromGUID(CUSTODIANS_TOKEN_GUID)
+    if custodiansToken then
+        local function delayedLiftCustodians()
+            local p = custodiansToken.getPosition()
+            p.y = p.y + 2
+            local collide = false
+            local fast = true
+            custodiansToken.setPositionSmooth(p, collide, fast)
+        end
+        Wait.time(delayedLiftCustodians, 3)
+    end
+
+    return 1
+end
+
+function placeCard(position, rotation, card, deck, entryGuid)
+    assert(type(position) == 'table' and type(rotation) == 'table')
+    if deck and deck.remainder then
+        if deck.remainder.getGUID() == entryGuid then
+            card = deck.remainder
+            deck = false
+            entryGuid = false
+        else
+            error('deck remainder does not match card')
+        end
+    end
+
+    if card then
+        local collide = false
+        local fast = true
+        card.setPositionSmooth(position, collide, fast)
+        card.setRotationSmooth(rotation, collide, fast)
+    elseif deck and entryGuid then
+        card = deck.takeObject({
+            guid     = entryGuid,
+            position = position,
+            rotation = rotation,
+            smooth   = true,
+        })
+    else
+        error('no card')
+    end
+    return card
+end
+
+function onButtonReturnCards(_, color)
+    startLuaCoroutine(self, 'returnCardsCoroutine')
+end
+
+function returnCardsCoroutine()
+    broadcastToAll('Returning planet cards')
+
+    local planetNameToCardOrDeckAndEntryGuid, extras = getPlanetNameToCardOrDeckAndEntryGuid()
+    coroutine.yield(0)
+
+    -- Destroy any extras.
+    for _, extra in ipairs(extras) do
+        if extra.card then
+            _safeDestroyObject(extra.card)
+        else
+            extra.deck.takeObject({
+                guid = extra.entryGuid,
+                callback_function = _safeDestroyObject
+            })
+        end
+        coroutine.yield(0)
+    end
+
+    -- Get the SET of planet names, ignore duplicates (handled by extras above).
+    local planetNameSet = {}
+    for system, object in pairs(getPlacedSystemToObject()) do
+        if not system.home then
+            for _, planet in ipairs(system.planets or {}) do
+                planetNameSet[planet.name] = true
+            end
+        end
+    end
+    coroutine.yield(0)
+
+    local index = 1
+    for planetName, _ in pairs(planetNameSet) do
+        local cardOrDeckAndEntryGuid = planetNameToCardOrDeckAndEntryGuid[planetName]
+        if cardOrDeckAndEntryGuid then
+            _deckHelper.discardCard({
+                guid = cardOrDeckAndEntryGuid.card and cardOrDeckAndEntryGuid.card.getGUID() or cardOrDeckAndEntryGuid.entryGuid,
+                name = planetName,
+                containerGuid = cardOrDeckAndEntryGuid.deck and cardOrDeckAndEntryGuid.deck.getGUID() or nil,
+                index = index
+            })
+            index = index + 1
+        else
+            broadcastToAll('Missing card for "' .. planet.name .. '"', 'Red')
+        end
+        coroutine.yield(0)
+    end
+    return 1
+end
+
+-------------------------------------------------------------------------------
+-- Counting stuff
+-------------------------------------------------------------------------------
+
+function count_slices3(_, color)
+    count_slices(3)
+end
+
+function count_slices4(_, color)
+    count_slices(4)
+end
+
+function count_slices5(_, color)
+    count_slices(5)
+end
+
+function count_slices6(_, color)
+    count_slices(6)
+end
+
+function count_slices7(_, color)
+    count_slices(7)
+end
+
+function count_slices8(_, color)
+    count_slices(8)
+end
+
+function clear_slicelabels()
+    local deletedItems = false
+    for _, object in ipairs(getAllObjects()) do
+        if object.getName() == 'TI4 Deleted Items' then
+            deletedItems = object
+        end
+    end
+    for _, object in ipairs(getAllObjects()) do
+        if(object.getName() == SLICE_DATALABEL_NAME) and (object.TextTool ~= nil) then
+            if deletedItems then
+                deletedItems.call('ignoreGuid', object.getGUID())
+            end
+            destroyObject(object)
+        end
+    end
+end
+
+function count_slices(count)
+    clear_slicelabels()
+
+    local tileDiameter = getInscribedTileRadius() * 2
+    local function labelPosition(homeSystemPosition)
+        local p = homeSystemPosition
+        local magnitude = math.sqrt(p.x ^ 2 + p.z ^ 2)
+        local normalized = { x = p.x / magnitude, z = p.z / magnitude }
+        return {
+            x = p.x + normalized.x * tileDiameter * 1,
+            y = p.y + 0.02,
+            z = p.z + normalized.z * tileDiameter * (p.z > 0 and 0.95 or 0.60)
+        }
+    end
+
+    local homeSystemPositions = _zoneHelper.getHomeSystemPositions(count)
+    local equidistantPositions = {}
+    for i, p1 in ipairs(homeSystemPositions) do
+        local p2 = homeSystemPositions[i < #homeSystemPositions and (i + 1) or 1]
+        local dir = {
+            x = (p1.x + p2.x) / 2,
+            y = (p1.y + p2.y) / 2,
+            z = (p1.z + p2.z) / 2,
+        }
+        local d = math.sqrt(dir.x ^ 2 + dir.z ^ 2)
+        local normalized = {
+            x = dir.x / d,
+            y = dir.y,
+            z = dir.z / d
+        }
+        local d = math.sqrt(p1.x ^ 2 + p1.z ^ 2)
+        local p = {
+            x = normalized.x * d,
+            y = normalized.y,
+            z = normalized.z * d
+        }
+        if math.abs(p.z) < 1 then
+            p.x = p.x * 0.8  -- otherwise to far out, goes under bags
+        end
+        table.insert(equidistantPositions, p)
+    end
+
+    local hsValue = {}
+    local eqValue = {}
+    for i = 1, #homeSystemPositions do
+        hsValue[i] = {
+            position = labelPosition(homeSystemPositions[i]),
+            resources = 0,
+            influence = 0,
+            tech = {}
+        }
+        eqValue[i] = {
+            position = labelPosition(equidistantPositions[i]),
+            resources = 0,
+            influence = 0,
+            tech = {}
+        }
+    end
+    local function updateValue(valueTable, system)
+        assert(type(valueTable) == 'table' and type(system) == 'table')
+        for _, planet in ipairs(system.planets or {}) do
+            valueTable.resources = valueTable.resources + (planet.resources or 0)
+            valueTable.influence = valueTable.influence + (planet.influence or 0)
+            if planet.tech then
+                table.insert(valueTable.tech, string.sub(planet.tech, 1, 1):upper())
+            end
+        end
+    end
+
+    local function getClosestIndex(positions, targetPosition)
+        local candidates = {}
+        for i, position in ipairs(positions) do
+            table.insert(candidates, {
+                index = i,
+                dSq = (position.x - targetPosition.x) ^ 2 + (position.z - targetPosition.z) ^ 2,
+            })
+        end
+        table.sort(candidates, function(a, b) return a.dSq < b.dSq end)
+        local d = candidates[2].dSq - candidates[1].dSq
+        return d > 1 and candidates[1].index or false
+    end
+
+    for system, object in pairs(getPlacedSystemToObject()) do
+        local i = getClosestIndex(homeSystemPositions, object.getPosition())
+        if i then
+            updateValue(hsValue[i], system)
+        else
+            i = getClosestIndex(equidistantPositions, object.getPosition())
+            if i then
+                updateValue(eqValue[i], system)
+            end
+        end
+    end
+
+    local function createLabel(position, rotation, textValue, fontSizeScale)
+        assert(type(textValue) == 'string')
+        local text = spawnObject({
+            type              = '3DText',
+            position          = position,
+            rotation          = rotation,
+            sound             = false,
+        })
+        text.setName(SLICE_DATALABEL_NAME)
+        text.TextTool.setValue(textValue)
+        text.TextTool.setFontSize(text.TextTool.getFontSize() * (fontSizeScale or 1))
+    end
+
+    local function valueToString(value)
+        local tech = #value.tech > 0 and (' ' .. table.concat(value.tech, '')) or ''
+        return value.resources .. '/' .. value.influence .. tech
+    end
+
+    for _, value in ipairs(hsValue) do
+        local text = valueToString(value)
+        createLabel(value.position, {x=90,y=0,z=0}, text, 1.5)
+    end
+    for _, value in ipairs(eqValue) do
+        local text = '(' .. valueToString(value) .. ')'
+        createLabel(value.position, {x=90,y=0,z=0}, text, 1)
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Drawing stuff
+-------------------------------------------------------------------------------
+
+function onButtonDrawLines()
+    _zoneHelper.drawBordersVectorLines({})
+end
+
+-------------------------------------------------------------------------------
+-- Helpers
+-------------------------------------------------------------------------------
+
+local _deletedItemsBagGuid = false
+function _safeDestroyObject(object)
+    assert(type(object) == 'userdata')
+    local deletedItems = _deletedItemsBagGuid and getObjectFromGUID(_deletedItemsBagGuid)
+    if not deletedItems then
+        for _, object in ipairs(getAllObjects()) do
+            if object.tag == 'Bag' and object.getName() == 'TI4 Deleted Items' then
+                _deletedItemsBagGuid = object.getGUID()
+                deletedItems = object
+                break
+            end
+        end
+    end
+    if deletedItems then
+        deletedItems.call('ignoreGuid', object.getGUID())
+    end
+    destroyObject(object)
+end
+
+function parseMapString(input)
+    assert(type(input) == 'string')
+    local buildList = {}
+
+    local centerSystem = string.match(input, '^{(%d+)}')
+    if centerSystem then
+        table.insert(buildList, tonumber(centerSystem))
+        local a,b = string.find(input, '}')
+        input = string.sub(input, b + 1)
+    else
+        table.insert(buildList, { tile = MECATOL_TILE })
+    end
+
+    -- %S is non-space
+    for key in string.gmatch(input, '%S+') do
+        local tile, ab, rotation = string.match(key, '(%d+)([AB])(%d+)')
+        table.insert(buildList, {
+            tile = tile and tonumber(tile) or tonumber(key),
+            ab = ab,
+            rotation = rotation
+        })
+    end
+    return buildList
+end
+
+function getTableY()
+    local function isZoneHelper2()
+        for _, object in ipairs(getAllObjects()) do
+            if object.getName() == 'TI4_ZONE_HELPER' then
+                return object.getVar('drawBordersVectorLines') and true
+            end
+        end
+    end
+    if isZoneHelper2() then
+        local zones = _zoneHelper.zonesAttributes()
+        return zones[1].center.y
+    end
+    return 1
+end
+
+function getPlacedSystemToObject()
+    local systemToObject = {}
+    local guidToSystem = _systemHelper.systems()
+    for _, object in ipairs(getAllObjects()) do
+        local system = guidToSystem[object.getGUID()]
+        if system then
+            systemToObject[system] = object
+        end
+    end
+    return systemToObject
+end
+
+function getOutscribedTileRadius()
+    local x = Grid.sizeX or 7
+    local y = Grid.sizeY or 7
+    assert(x == y, 'error: not a square grid')
+    return x / 2.0
+end
+
+function getInscribedTileRadius()
+    local r = getOutscribedTileRadius()
+    local c = r
+    local b = r / 2.0
+    return math.sqrt(c^2 - b^2)
+end
+
+function getSystemPositionsStartingAtOriginIterator(dy)
+    local tileDiameter = getInscribedTileRadius() * 2
+    local function move_in_dir(start, dir)
+        return {
+            x = start.x + math.sin(math.rad(dir)) * tileDiameter,
+            y = start.y,
+            z = start.z + math.cos(math.rad(dir)) * tileDiameter
+        }
+    end
+
+    local function spiral_hex_iterator(startpos, startrot)
+        local level = 0
+        local dir = 120
+        local steps = 0
+        local north = startrot.y
+        local nextpos = move_in_dir(startpos, north)
+        return function()
+            if level == 0 then
+                level = 1
+                return startpos
+            end
+            local thispos = nextpos
+            nextpos = move_in_dir(nextpos, north + dir)
+            steps = steps + 1
+            if steps >= level then
+                steps = 0
+                dir = (dir + 60) % 360
+                if dir == 120 then
+                    nextpos = move_in_dir(nextpos, north)
+                    level = level + 1
+                end
+            end
+            return thispos
+        end
+    end
+
+    local origin = { x = 0, y = getTableY() + (dy or 0), z = 0 }
+    local rotation = { x = 0, y = 0, z = 0 }
+    return spiral_hex_iterator(origin, rotation)
+end
+
+-------------------------------------------------------------------------------
+-- Index is only called when the key does not already exist.
+local _lockGlobalsMetaTable = {}
+function _lockGlobalsMetaTable.__index(table, key)
+    error('Accessing missing global "' .. tostring(key or '<nil>') .. '", typo?', 2)
+end
+function _lockGlobalsMetaTable.__newindex(table, key, value)
+    error('Globals are locked, cannot create global variable "' .. tostring(key or '<nil>') .. '"', 2)
+end
+setmetatable(_G, _lockGlobalsMetaTable)

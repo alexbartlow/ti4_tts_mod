@@ -1,0 +1,216 @@
+
+function onLoad()
+  createInputs()
+end
+
+function createInputs()
+     self.createButton({
+        click_function = "dobags",
+        function_owner = self,
+        label          = "FrankenBags",
+        position       = {x=0, y=0.2, z=-0.6},
+        width          = 1000,
+        height         = 400,
+        font_size      = 200,
+    })
+
+end
+
+
+function dobags()
+  -- create six bags
+  basebag = getObjectFromGUID("1c711e")
+  
+  bag1 = basebag.clone({['position'] = {4,3,-6} })
+  bag1.setColorTint(stringColorToRGB("Yellow"))
+  bag2 = basebag.clone({['position'] = {0,3,-6} })
+  bag2.setColorTint(stringColorToRGB("Red"))
+  bag3 = basebag.clone({['position'] = {-4,3,-6} })
+  bag3.setColorTint(stringColorToRGB("Green"))
+  bag4 = basebag.clone({['position'] = {4,3,6} })
+  bag4.setColorTint(stringColorToRGB("Purple"))
+  bag5 = basebag.clone({['position'] = {0,3,6} })
+  bag5.setColorTint(stringColorToRGB("Blue"))  
+  bag6 = basebag.clone({['position'] = {-4,3,6} })
+  bag6.setColorTint(stringColorToRGB("White"))  
+  -- put things into the 6 bags
+  
+ z = getAllObjects()
+    for i, object in ipairs(z) do
+        name = string.upper(object.getName())
+        if name == "BLUE PLANET TILES" then
+            object.shuffle();
+			bag1.putObject(object.takeObject())
+			bag1.putObject(object.takeObject())
+			bag1.putObject(object.takeObject())
+			bag2.putObject(object.takeObject())
+			bag2.putObject(object.takeObject())
+			bag2.putObject(object.takeObject())
+			bag3.putObject(object.takeObject())
+			bag3.putObject(object.takeObject())
+			bag3.putObject(object.takeObject())
+			bag4.putObject(object.takeObject())
+			bag4.putObject(object.takeObject())
+			bag4.putObject(object.takeObject())
+			bag5.putObject(object.takeObject())
+			bag5.putObject(object.takeObject())
+			bag5.putObject(object.takeObject())
+			bag6.putObject(object.takeObject())
+			bag6.putObject(object.takeObject())
+			bag6.putObject(object.takeObject())
+        end
+        if name == "RED ANOMALY TILES" then
+            object.shuffle();
+			bag1.putObject(object.takeObject())
+			bag1.putObject(object.takeObject())
+			bag2.putObject(object.takeObject())
+			bag2.putObject(object.takeObject())
+			bag3.putObject(object.takeObject())
+			bag3.putObject(object.takeObject())
+			bag4.putObject(object.takeObject())
+			bag4.putObject(object.takeObject())
+			bag5.putObject(object.takeObject())
+			bag5.putObject(object.takeObject())
+			bag6.putObject(object.takeObject())
+			bag6.putObject(object.takeObject())
+        end		
+        if name == "HOME SYSTEMS" then
+            object.shuffle();
+			bag1.putObject(object.takeObject())
+			bag1.putObject(object.takeObject())
+			bag2.putObject(object.takeObject())
+			bag2.putObject(object.takeObject())
+			bag3.putObject(object.takeObject())
+			bag3.putObject(object.takeObject())
+			bag4.putObject(object.takeObject())
+			bag4.putObject(object.takeObject())
+			bag5.putObject(object.takeObject())
+			bag5.putObject(object.takeObject())
+			bag6.putObject(object.takeObject())
+			bag6.putObject(object.takeObject())
+        end
+        if name == "FLAGSHIPS" then
+            object.shuffle();
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+        end
+        if name == "STARTING TECHS" then
+            object.shuffle();
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+        end
+        if name == "STARTING UNITS" then
+            object.shuffle();
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+        end
+        if name == "COMMODITY TILES" then
+            object.shuffle();
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+        end
+        if name == "PROMISSORY NOTES" then
+            object.shuffle();
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+        end
+        if name == "FACTION TECHS" then
+            object.shuffle();
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+        end
+        if name == "FACTION ABILITIES" then
+            object.shuffle();
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag1.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag2.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag3.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag4.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag5.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+            bag6.putObject(object.takeObject())
+        end
+    end
+end

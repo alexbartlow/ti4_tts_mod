@@ -1,0 +1,2206 @@
+-- ############################################################################
+-- #### START #include <~/CrLua/Objects/TI4_SpreadsheetUpdate>
+-- ############################################################################
+
+--- Keep track of each players' tech, and acquisition order.
+-- @author Darrell, Milty
+--
+-- Assumes Nekro makes a copy of assimilated technology cards.
+-------------------------------------------------------------------------------
+
+local TAG = 'SpreadsheetUpdate'
+
+-------------------------------------------------------------------------------
+
+local _data = {
+    sheetIdTech = false,
+    sheetNameTech = 'Sheet1',
+
+    sheetIdScore = false,
+    sheetNameScore = 'Sheet1',
+
+    updateBetweenTurns = false,
+    saveIds = false,
+
+    playerColorToTechs = {},
+    playerColorToStrategy = {},
+    playerScores = {},
+    stageOneObjectives = {},
+    StageOneMap = {},
+    stageTwoObjectives = {},
+    StageTwoMap = {},
+    secretsOrder = {},
+    playerSecrets = {},
+    supportMap = {},
+    mecatolPoints = {},
+    otherPoints = {}
+}
+
+function onLoad(saveState)
+    CrLua.Log.d(TAG, 'onLoad')
+    local success, value = pcall(function() return JSON.decode(saveState) end)
+    if success and value and type(value) == 'table' then
+        for k, v in pairs(value) do
+            _data[k] = v
+        end
+    end
+
+    -- Make it an error to access/write a missing key.
+    _data = CrLua.LockTable.readWriteRequireKey('_data', _data)
+
+    Wait.frames(createUI, 3)
+    Wait.frames(updateUI, 5)  -- wait for UI to exist before updating
+
+    local header = 'Make a copy of each sheet and get share URLs where anyone with the URL has editor permission.'
+    local score = 'https://docs.google.com/spreadsheets/d/1aIZZlwt8ePYxCVbxjNXjB5lMdl0kbyiTYU1Al8RUa4A/edit?usp=sharing'
+    local tech = 'https://docs.google.com/spreadsheets/d/1EsxsOkX1_rR2ip4PMB6LXScm4TDWEcXIgbl8D6zc-0s/edit?usp=sharing'
+
+    self.setDescription(table.concat({
+        header,
+        '',
+        'Score sheet: ' .. score,
+        '',
+        'Tech sheet: ' .. tech
+    }, '\n'))
+end
+
+function onSave()
+    assert(_data, 'data')
+
+    -- Optionally remove the sheet ids from save, may not want them in file.
+    local save = {}
+    for k, v in pairs(_data) do
+        save[k] = v
+    end
+    if not _data.saveIds then
+        save.sheetIdTech = false
+        save.sheetIdScore = false
+    end
+
+    return JSON.encode(save)
+end
+
+function onPlayerTurnStart(playerColorStart, playerColorPrevious)
+    maybeAsyncUpdate(_data.updateBetweenTurns)
+end
+
+-------------------------------------------------------------------------------
+
+local _asyncUpdateQueue = {}
+local _lastAsyncUpdateTime = false
+
+function maybeAsyncUpdate(alsoUpdateSheet)
+    assert(type(alsoUpdateSheet) == 'boolean')
+    if _lastAsyncUpdateTime then
+        local nextAsyncUpdateTime = _lastAsyncUpdateTime + 3
+        if Time.time < nextAsyncUpdateTime then
+            return
+        end
+    end
+    asyncUpdate(alsoUpdateSheet)
+end
+
+function asyncUpdate(alsoUpdateSheet)
+    assert(type(alsoUpdateSheet) == 'boolean')
+    _lastAsyncUpdateTime = Time.time
+    table.insert(_asyncUpdateQueue, alsoUpdateSheet)
+    startLuaCoroutine(self, 'asyncUpdateCoroutine')
+end
+
+function asyncUpdateCoroutine()
+    local alsoUpdateSheet = table.remove(_asyncUpdateQueue)
+    if not alsoUpdateSheet then
+        return 1
+    end
+    assert(type(alsoUpdateSheet) == 'boolean')
+
+    updateTechState()
+    coroutine.yield(0)
+
+    updateSpreadsheetTech()
+    coroutine.yield(0)
+
+    updateScoreState()
+    coroutine.yield(0)
+
+    updateSpreadsheetScore()
+    coroutine.yield(0)
+
+    return 1
+end
+
+-------------------------------------------------------------------------------
+
+function updateTechState()
+    -- Update the local table to preserve order.  Does not push to sheet.
+    _data.playerColorToTechs = CrLua.TI4.PlayerTech.updateAllPlayersToTech(_data.playerColorToTechs)
+end
+
+function updateScoreState()
+    local nameToScoreObjects = CrLua.TI4.PlayerScore.getNameToScoreObjects()
+    coroutine.yield(0)
+    local nameToOwnerTokens = CrLua.TI4.PlayerScore.nameToOwnerTokens(nameToScoreObjects)
+    coroutine.yield(0)
+    _data.playerScores = CrLua.TI4.PlayerScore.colorToScore(nameToScoreObjects, nameToOwnerTokens)
+    coroutine.yield(0)
+    _data.stageOneObjectives = CrLua.TI4.PlayerScore.updatePublicOneObjectives(_data.stageOneObjectives, nameToScoreObjects)
+    coroutine.yield(0)
+    _data.StageOneMap = CrLua.TI4.PlayerScore.mapStageOne(nameToOwnerTokens)
+    coroutine.yield(0)
+    _data.stageTwoObjectives = CrLua.TI4.PlayerScore.updatePublicTwoObjectives(_data.stageTwoObjectives, nameToScoreObjects)
+    coroutine.yield(0)
+    _data.StageTwoMap = CrLua.TI4.PlayerScore.mapStageTwo(nameToOwnerTokens)
+    coroutine.yield(0)
+
+    -- Lua does not let one update two fields this way, but locals then move to fields separately works.
+    local secretsOrder, playerSecrets = CrLua.TI4.PlayerScore.updateSecrets(_data.secretsOrder, _data.playerSecrets, nameToOwnerTokens)
+    _data.secretsOrder = assert(secretsOrder)
+    _data.playerSecrets = assert(playerSecrets)
+    coroutine.yield(0)
+
+    _data.playerColorToStrategy = CrLua.TI4.PlayerScore.updateStrategy()
+    coroutine.yield(0)
+    _data.supportMap = CrLua.TI4.PlayerScore.mapSupports(nameToOwnerTokens)
+    coroutine.yield(0)
+    _data.mecatolPoints = CrLua.TI4.PlayerScore.getMecatolPoints(_data.mecatolPoints, nameToOwnerTokens)
+    coroutine.yield(0)
+    _data.otherPoints = CrLua.TI4.PlayerScore.mapOtherPoints(_data.otherPoints, nameToOwnerTokens)
+    coroutine.yield(0)
+end
+
+-------------------------------------------------------------------------------
+
+function _sheetId(idOrUrl)
+    assert(type(idOrUrl) == 'string')
+    local id = idOrUrl
+    if string.match(id, '^http') then
+        id = CrLua.TTS.Spreadsheet.idFromUrl(id)
+    end
+    return string.len(id) > 0 and id
+end
+
+function validateSpreadsheetTech()
+    local function callback(value)
+        if value ~= 'Sarween' then
+            error('either cannot access sheet or sheet is not the tech sheet (j5 not "Sarween")')
+        end
+    end
+    CrLua.TTS.Spreadsheet.get('tech', _sheetIdTech, _sheetNameTech, 'j5', callback)
+end
+
+function updateSpreadsheetTech()
+    local sheetId = _sheetId(_data.sheetIdTech)
+    local sheetName = _data.sheetNameTech
+
+    if not sheetId then
+        CrLua.Log.d(TAG, 'no tech spreadsheet, not updating tech')
+        return
+    end
+
+    local cells = CrLua.TI4.PlayerTech.getCells(_data.playerColorToTechs)
+    coroutine.yield(0)
+
+    CrLua.Log.d(TAG, 'updating tech spreadsheet')
+    CrLua.TTS.Spreadsheet.update('tech', sheetId, sheetName, cells)
+end
+
+function updateSpreadsheetScore()
+    local sheetId = _sheetId(_data.sheetIdScore)
+    local sheetName = _data.sheetNameScore
+
+    if not sheetId then
+        CrLua.Log.d(TAG, 'no score spreadsheet, not updating score')
+        return
+    end
+
+    local cells = {}
+    CrLua.TI4.PlayerScore.setCellsFactions(cells)
+    coroutine.yield(0)
+    CrLua.TI4.PlayerScore.setCellsPlayerNames(cells)
+    coroutine.yield(0)
+    CrLua.TI4.PlayerScore.setCellsStrategyCards(cells, _data.playerColorToStrategy)
+    coroutine.yield(0)
+    CrLua.TI4.PlayerScore.setCellsScores(cells, _data.playerScores)
+    coroutine.yield(0)
+    CrLua.TI4.PlayerScore.setCellsPublicObjectivesAndRound(cells, _data.stageOneObjectives, _data.stageTwoObjectives, _data.StageOneMap, _data.StageTwoMap)
+    coroutine.yield(0)
+    CrLua.TI4.PlayerScore.setCellsSecretObjectives(cells, _data.secretsOrder, _data.playerSecrets)
+    coroutine.yield(0)
+    CrLua.TI4.PlayerScore.setCellsSupport(cells, _data.supportMap)
+    coroutine.yield(0)
+    CrLua.TI4.PlayerScore.setCellsMecatol(cells, _data.mecatolPoints)
+    coroutine.yield(0)
+    CrLua.TI4.PlayerScore.setCellsOther(cells, _data.otherPoints)
+    coroutine.yield(0)
+
+    --for k, v in pairs(cells) do print('(' .. k .. ') = "' .. v .. '"') end
+
+    CrLua.Log.d(TAG, 'updating score spreadsheet')
+    CrLua.TTS.Spreadsheet.update('score', sheetId, sheetName, cells)
+end
+-------------------------------------------------------------------------------
+
+function createUI()
+    local defaults = {
+        tag = 'Defaults',
+        children = {
+            {
+                tag = 'Toggle',
+                attributes = {
+                    fontSize = 12,
+                    onValueChanged = 'onToggleValueChanged',
+                }
+            },
+            {
+                tag = 'Button',
+                attributes = {
+                    onClick = 'onButtonClick',
+                    fontSize = 24,
+                }
+            },
+            {
+                tag = 'Text',
+                attributes = {
+                    class = 'label',
+                    fontSize = 14,
+                    alignment = 'MiddleLeft'
+                }
+            },
+            {
+                tag = 'Text',
+                attributes = {
+                    class = 'title',
+                    fontSize = 24,
+                    fontStyle = 'Bold',
+                    alignment = 'MiddleCenter'
+                }
+            },
+            {
+                tag = 'InputField',
+                attributes = {
+                    fontSize = 14,
+                    onValueChanged = 'onInputValueChanged',
+                    lineType = 'MultiLineSubmit',
+                }
+            },
+        }
+    }
+    local top = {
+        tag = 'VerticalLayout',
+        attributes = {
+            position = '0 0 2',  -- 0.05
+            rotation = '0 180 90',
+            width = 200,
+            height = 280,
+            padding = '10 10 0 0',
+            spacing = 10,
+        },
+        children = {
+            {
+                tag = 'Text',
+                attributes = {
+                    class = 'title'
+                },
+                value = 'Spreadsheet'
+            },
+            {
+                tag = 'Button',
+                attributes = {
+                    id = 'update',
+                },
+                value = 'Update'
+            },
+            {
+                tag = 'Text',
+                attributes = {
+                    fontSize = 12
+                },
+                value = '(Flip for settings)'
+            }
+        }
+    }
+
+    local bottom = {
+        tag = 'VerticalLayout',
+        attributes = {
+            position = '0 0 -22',  -- -20.05
+            rotation = '0 0 90',
+            width = 200,
+            height = 280,
+            padding = '10 10 10 10',
+            spacing = 10,
+        },
+        children = {
+            {
+                tag = 'InputField',
+                attributes = {
+                    id = 'sheetIdTech',
+                    placeHolder = 'Tech sheet id or URL',
+                },
+            },
+            {
+                tag = 'InputField',
+                attributes = {
+                    id = 'sheetIdScore',
+                    placeHolder = 'Score sheet id or URL',
+                },
+            },
+            {
+                tag = 'Toggle',
+                attributes = {
+                    id = 'updateBetweenTurns',
+                    fontSize = 14,
+                },
+                value = 'Update between turns'
+            },
+            {
+                tag = 'Toggle',
+                attributes = {
+                    id = 'saveIds',
+                    fontSize = 14,
+                },
+                value = 'Save ids?'
+            },
+
+        }
+    }
+
+    self.UI.setXmlTable({ defaults, top, bottom })
+end
+
+function updateUI()
+    self.UI.setAttribute('updateBetweenTurns', 'isOn', _data.updateBetweenTurns)
+    self.UI.setAttribute('saveIds', 'isOn', _data.saveIds)
+    if _data.sheetIdTech then
+        self.UI.setAttribute('sheetIdTech', 'text', _data.sheetIdTech)
+    end
+    if _data.sheetIdScore then
+        self.UI.setAttribute('sheetIdScore', 'text', _data.sheetIdScore)
+    end
+end
+
+function onButtonClick(player, value, id)
+    if id == 'update' then
+        asyncUpdate(true)
+    else
+        error('unknown button id "' .. id .. '"')
+    end
+end
+
+function onToggleValueChanged(player, value, id)
+    local valueAsBool = string.lower(value) == 'true' and true or false
+    if id == 'updateBetweenTurns' then
+        _data.updateBetweenTurns = valueAsBool
+    elseif id == 'saveIds' then
+        _data.saveIds = valueAsBool
+    else
+        error('unknown toggle id "' .. id .. '"')
+    end
+end
+
+function onInputValueChanged(player, value, id)
+    if id == 'sheetIdTech' then
+        _data.sheetIdTech = value
+    elseif id == 'sheetIdScore' then
+        _data.sheetIdScore = value
+    else
+        error('unknown input id "' .. id .. '"')
+    end
+end
+
+-------------------------------------------------------------------------------
+
+-- ############################################################################
+-- #### START #include <~/CrLua/CrLua>
+-- ############################################################################
+
+-------------------------------------------------------------------------------
+--- Create the base CrLua table, with require function for dependencies.
+-- @author Darrell
+--
+-- Suggested use: at the END of the object script (so #include does not affect
+-- line number reporting in the above portion), include CrLua and dependencies:
+--
+-- #include <~/CrLua/CrLua>
+-- #include <~/CrLua/LockGlobals>
+--
+-- #include <~/CrLua/[OTHER_DEPENDENCY]> (repeat)
+--
+-- CrLua.assertRequired() -- do this BEFORE lock
+-- CrLua.lock()
+--
+-- -- Optionally enable logging.
+-- CrLua.Log.setLogLevel(CrLua.Log.LOG_LEVEL.DEBUG)
+-------------------------------------------------------------------------------
+
+local TAG = 'CrLua'
+
+-- Create a GLOBAL CrLua table.
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua._require = { 'LockTable' }
+
+-------------------------------------------------------------------------------
+--- Assert all required packages exist.
+-- @param extraRequires table : list of additional require entries.
+-- @param table : table to search for _require entries, or CrLua if nil.
+--
+-- Modules add dependencies by having a _require item in their root table,
+-- with a list of module names.
+-- e.g. CrLua.MyModule = { _require = { 'OtherModule1', 'OtherModule2' } }.
+-------------------------------------------------------------------------------
+function CrLua.assertRequired(extraRequires, table)
+    local seen = {}
+    local requireSet = {}
+    local haveSet = {}
+
+    if extraRequires then
+        for _, name in ipairs(extraRequires) do
+            requireSet[name] = true
+        end
+    end
+
+    local function addRequireEntries(table, packagePath)
+        assert(type(table) == 'table')
+        if seen[table] then
+            return
+        end
+        seen[table] = true
+        if table._require then
+            for _, name in ipairs(table._require) do
+                requireSet[name] = true
+            end
+            if packagePath then
+                haveSet[packagePath] = true
+            end
+        end
+        for k, v in pairs(table) do
+            if type(v) == 'table' and not string.match(k, '^[_%l]') then
+                local recurse = type(k) == 'string' and string.match(k, '^%u')
+                if recurse then
+                    local childPackagePath = (packagePath and (packagePath .. '.') or '') .. k
+                    addRequireEntries(v, childPackagePath)
+                end
+            end
+        end
+    end
+    addRequireEntries(table or CrLua)
+
+    -- Make sure all required packages are present.
+    local message = false
+    for package, _ in pairs(requireSet) do
+        assert(type(package) == 'string')
+        -- Descend dot-delimited sub-package names.
+        local entry = CrLua
+        for subPackage in string.gmatch(package, '[^%.]+') do
+            entry = entry and entry[subPackage]
+        end
+        if not entry then
+            message = (message and message .. ', ' or '') .. package
+        end
+    end
+    if message then
+        error(TAG .. ': assertRequired missing ' .. message)
+    end
+
+    -- Make sure all present packages are required.
+    local message = false
+    for package, _ in pairs(haveSet) do
+        if not requireSet[package] then
+            message = (message and message .. ', ' or '') .. package
+        end
+    end
+    if message then
+        error(TAG .. ': assertRequired have not-required ' .. message)
+    end
+
+end
+
+-------------------------------------------------------------------------------
+--- Lock CrLua packages.
+--
+-- @param tableName string : name of table being locked, or nil for CrLua.
+-- @param table : table being locked, or nil for CrLua.
+--
+-- Make CrLua and nested packages read-only, with access requiring keys exist.
+--
+-- Locking rules:
+--
+-- (1.) '_data' is a reserved table name for mutable tables.  Do not lock.
+--
+-- (2.) If the table starts with a capital letter, make it read-only and
+-- require keys exist.  These are packages or constants, attempting to access
+-- a missing field is probably a typo.  (Override by adding an
+-- _allowMissingKeys = { 'tableName1', 'tableName2'} entry at the same level
+-- as the referenced tables.  Such tables allow reads to missing keys, as well
+-- as all sub-tables in them.)
+--
+-- (2.) Otherwise make it read-only but allow reads to missing keys (value nil).
+-- One can query membership by checking if a key exists.
+--
+-- This helps catch typos calling non-existent functions, or overwriting
+-- a constant value by mistake.
+-------------------------------------------------------------------------------
+function CrLua.lock(tableName, table)
+    local seen = {}
+
+    local function lockRecursive(tableName, table, allowMissingKeys)
+        assert(type(tableName) == 'string' and type(table) == 'table' and type(allowMissingKeys) == 'boolean')
+
+        -- Watch out for cycles!  This might happen if a script defines
+        -- an enum table, then later uses one of them in a different table.
+        if seen[table] then
+            return
+        end
+        seen[table] = true
+
+        -- Leave _data tables alone.
+        local isData = tableName == '_data'
+        if isData then
+            return
+        end
+
+        -- Get any missing keys entry BEFORE locking this table.
+        local allowMissingKeysTableNameSet = {}
+        if table._allowMissingKeys then
+            for _, tableName in ipairs(table._allowMissingKeys) do
+                allowMissingKeysTableNameSet[tableName] = true
+            end
+        end
+
+        -- Lock the given table.
+        local firstLetter = string.match(tableName, '%a')
+        local isUpper = firstLetter and firstLetter == string.upper(firstLetter)
+        if isUpper and not allowMissingKeys then
+            CrLua.LockTable.readOnlyRequireKey(tableName, table)
+        else
+            CrLua.LockTable.readOnly(tableName, table)
+        end
+
+        -- Lock sub-tables, respecting _allowMissingKeys values.
+        for k, v in pairs(table) do
+            if type(v) == 'table' then
+                local entryAllowMissingKeys = allowMissingKeys or allowMissingKeysTableNameSet[k] or false
+                lockRecursive(tostring(k), v, entryAllowMissingKeys)
+            end
+        end
+    end
+
+    lockRecursive(tableName or 'CrLua', table or CrLua, false)
+end
+
+-- ############################################################################
+-- #### END #include <~/CrLua/CrLua>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/LockGlobals>
+-- ############################################################################
+
+-------------------------------------------------------------------------------
+--- Partially lock the _G global variable table.
+-- Include this AFTER creating any necessary globals to prevent new ones.
+--
+-- - Existing globals can still be read AND WRITTEN.
+-- - Cannot read non-existent globals.
+-- - Cannot write new globals.
+--
+-- This helps catch typos where what was meant to access a local instead
+-- references a (hopefully non-existent) global, as well as forgetting to use
+-- "local" when creating objects.
+--
+-- @author Darrell
+-------------------------------------------------------------------------------
+
+local TAG = 'CrLua.LockGlobals'
+local _lockGlobalsMetaTable = {}
+
+-- Index is only called when the key does not already exist.
+function _lockGlobalsMetaTable.__index(table, key)
+    error(TAG .. ': accessing missing global "' .. tostring(key or '<nil>') .. '", typo?', 2)
+end
+
+function _lockGlobalsMetaTable.__newindex(table, key, value)
+    error(TAG .. ': globals are locked, cannot create global variable "' .. tostring(key or '<nil>') .. '"', 2)
+end
+
+setmetatable(_G, _lockGlobalsMetaTable)
+
+-------------------------------------------------------------------------------
+
+-- Add a test function to the CrLua "namespace".
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.LockGlobals = assert(not CrLua.LockGlobals) and {
+    _require = { 'LockGlobals' }  -- require self to avoid missing require error
+}
+
+-- ############################################################################
+-- #### END #include <~/CrLua/LockGlobals>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/List>
+-- ############################################################################
+
+-------------------------------------------------------------------------------
+--- Lua list utility functions
+-- @author Darrell
+-------------------------------------------------------------------------------
+
+local TAG = 'CrLua.List'
+
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.List = assert(not CrLua.List) and {
+    _require = {}
+}
+
+-------------------------------------------------------------------------------
+--- Concatenate two lists.
+-- @param a list: table with number indices.
+-- @param b list: table with number indices.
+-- @return list: list with a's entries followed by b's entries.
+-------------------------------------------------------------------------------
+function CrLua.List.join(a, b)
+    assert(type(a) == 'table' and type(b) == 'table')
+
+    local result = {}
+    for _, v in ipairs(a) do
+        table.insert(result, v)
+    end
+    for _, v in ipairs(b) do
+        table.insert(result, v)
+    end
+    return result
+end
+
+-------------------------------------------------------------------------------
+--- Convert the keys of a table to a list.
+-- The list is dependent on table key iteration order, make no assumptions!
+-- @param set table : map from key to true.
+-- @return list : table with number indices.
+-------------------------------------------------------------------------------
+function CrLua.List.fromKeys(set)
+    assert(type(set) == 'table')
+
+    local result = {}
+    for k, v in pairs(set) do
+        table.insert(result, k)
+    end
+    return result
+end
+
+-------------------------------------------------------------------------------
+--- Reduce a list to unique elements.
+-- @param list : table with number inidice.
+-- @return list : table with number indices and unique elements.
+-------------------------------------------------------------------------------
+function CrLua.List.unique(list)
+    local result = {}
+    local seen = {}
+    for _, v in ipairs(list) do
+        if not seen[v] then
+            seen[v] = true
+            table.insert(result, v)
+        end
+    end
+    return result
+end
+
+-------------------------------------------------------------------------------
+--- Given an updated list, append any new items not in the old list but
+-- otherwise preserve old list order.  Also remove any items in the old
+-- list that are not in the new list.
+-- @param oldList : use this item order.
+-- @param newList : append any new items not in old, remove any old items not in new.
+-- @return list : table with the add/prune modifications.
+-------------------------------------------------------------------------------
+function CrLua.List.pruneAndAppendMissing(oldList, newList)
+    assert(type(oldList) == 'table' and type(newList) == 'table')
+
+    local oldCounts = {}
+    for _, oldItem in ipairs(oldList) do
+        oldCounts[oldItem] = (oldCounts[oldItem] or 0) + 1
+    end
+    local newCounts = {}
+    for _, newItem in ipairs(newList) do
+        newCounts[newItem] = (newCounts[newItem] or 0) + 1
+    end
+
+    -- Start by copying over old items in order, prune any missing from new.
+    local result = {}
+    for _, item in ipairs(oldList) do
+        local newCount = newCounts[item]
+        if newCount then
+            newCounts[item] = newCount > 1 and (newCount - 1)
+            table.insert(result, item)
+        end
+    end
+
+    -- Then add any new entries.
+    for _, item in ipairs(newList) do
+        local oldCount = oldCounts[item]
+        if oldCount then
+            oldCounts[item] = oldCount > 1 and (oldCount - 1)
+        else
+            table.insert(result, item)
+        end
+    end
+
+    return result
+end
+
+-- ############################################################################
+-- #### END #include <~/CrLua/List>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/LockTable>
+-- ############################################################################
+
+-------------------------------------------------------------------------------
+--- Access control for tables.
+--
+-- Locked tables are empty, using a metatable to detect and redirect all forms
+-- of access to the actual table data.  Metatables contain a few custom fields:
+-- - '_name' string table name.
+-- - '_attrSet' table from set attribute names to true.
+-- - '_tableContents' table holding the actual locked table content.
+--
+-- @author Darrell
+-------------------------------------------------------------------------------
+
+local TAG = 'CrLua.LockTable'
+
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.LockTable = assert(not CrLua.LockTable) and {
+    _require = {}
+}
+
+CrLua.LockTable.ATTR = {
+    READ_ONLY = 1,
+    REQUIRE_KEY = 2
+}
+
+CrLua.LockTable.ACCESS_TYPE = {
+    READ_MISSING = 'read missing',
+    WRITE_NEW = 'write new',
+    OVERWRITE = 'overwrite'
+}
+
+-------------------------------------------------------------------------------
+--- Error and stop script when misusing a locked table.
+-------------------------------------------------------------------------------
+function CrLua.LockTable._error(lockedTable, key, accessType)
+    assert(type(lockedTable) == 'table' and type(accessType) == 'string')
+    local metatable = assert(getmetatable(lockedTable))
+    local tableName = assert(metatable._name)
+    local keyName = tostring(key or '<nil>')
+    error(TAG .. ': ' .. accessType .. ' ' .. tableName .. '.' .. keyName)
+end
+
+-------------------------------------------------------------------------------
+--- Create a new table with the lock table metamethods.
+-- @param tableName string : use this as the tableName.key when reporting errors.
+-- @param attrs table : list of LockTable.ATTRS to apply.
+-- @param table : table to lock (this table itself is mutated!)
+-- @return table : the same table, returned for create-by-wrapping convenience.
+-------------------------------------------------------------------------------
+function CrLua.LockTable._apply(tableName, attrs, table)
+    assert(type(tableName) == 'string' and type(attrs) == 'table' and type(table) == 'table')
+
+    -- Do not attempt to lock a table that already has a metatable.
+    assert(not getmetatable(table), 'cannot apply LockTable when a metatable is already set: ' .. tableName)
+
+    local newMetaTable = {
+        _name = tableName,
+        _attrSet = {},
+        _tableContents = {}
+    }
+
+    -- Add the metatable methods to behave like the original table.
+    for k, v in pairs(CrLua.LockTable._metatable) do
+        newMetaTable[k] = v
+    end
+
+    -- Apply attrs.
+    for _, attr in ipairs(attrs) do
+        assert(type(attr) == 'number')
+        newMetaTable._attrSet[attr] = true
+    end
+
+    -- Move table contents.
+    for k, v in pairs(table) do
+        newMetaTable._tableContents[k] = v
+        table[k] = nil
+    end
+
+    setmetatable(table, newMetaTable)
+    return table
+end
+
+CrLua.LockTable._metatable = {}
+
+function CrLua.LockTable._metatable.__index(lockedTable, key)
+    local metatable = getmetatable(lockedTable)
+    local attrSet = metatable._attrSet
+    local tableContents = metatable._tableContents
+    local value = tableContents[key]
+    local existing = value ~= nil
+    if not existing and attrSet[CrLua.LockTable.ATTR.REQUIRE_KEY] then
+        CrLua.LockTable._error(lockedTable, key, CrLua.LockTable.ACCESS_TYPE.READ_MISSING)
+    end
+    return value
+end
+
+function CrLua.LockTable._metatable.__newindex(lockedTable, key, value)
+    local metatable = getmetatable(lockedTable)
+    local attrSet = metatable._attrSet
+    local tableContents = metatable._tableContents
+    local existing = tableContents[key] ~= nil
+    if attrSet[CrLua.LockTable.ATTR.READ_ONLY] then
+        local accessType = existing and CrLua.LockTable.ACCESS_TYPE.OVERWRITE or CrLua.LockTable.ACCESS_TYPE.WRITE_NEW
+        CrLua.LockTable._error(lockedTable, key, accessType)
+    elseif not existing and attrSet[CrLua.LockTable.ATTR.REQUIRE_KEY] then
+        CrLua.LockTable._error(lockedTable, key, CrLua.LockTable.ACCESS_TYPE.WRITE_NEW)
+    end
+    tableContents[key] = value
+end
+
+function CrLua.LockTable._metatable.__pairs(lockedTable)
+    local metatable = getmetatable(lockedTable)
+    local tableContents = metatable._tableContents
+    local function iter(_, k)
+        local k, v = next(tableContents, k)
+        if v ~= nil then
+            return k, v
+        end
+    end
+    return iter, lockedTable, nil
+end
+
+function CrLua.LockTable._metatable.__ipairs(lockedTable)
+    local metatable = getmetatable(lockedTable)
+    local tableContents = metatable._tableContents
+    local function iter(_, i)
+        local v = tableContents[i + 1]
+        if v ~= nil then
+            return i + 1, v
+        end
+    end
+    return iter, lockedTable, 0
+end
+
+function CrLua.LockTable._metatable.__len(lockedTable)
+    local metatable = getmetatable(lockedTable)
+    local tableContents = metatable._tableContents
+    return #tableContents
+end
+
+-------------------------------------------------------------------------------
+--- Make table read-only.
+-- Reads to missing values return nil, as normal.
+-- If the table has a _name entry, use that when reporting errors.
+-- @param table
+-- @param table : the same table as the argument for convenience assignment.
+-------------------------------------------------------------------------------
+function CrLua.LockTable.readOnly(tableName, table)
+    assert(type(tableName) == 'string' and type(table) == 'table')
+    assert(type(table) == 'table')
+
+    local attrs = { CrLua.LockTable.ATTR.READ_ONLY }
+    return CrLua.LockTable._apply(tableName, attrs, table)
+end
+
+-------------------------------------------------------------------------------
+--- Make table read-only, and error if accessing missing key.
+-- Helps catch typos reading from must-have-item tables.
+-- @param table
+-- @param table : the same table as the argument for convenience assignment.
+-------------------------------------------------------------------------------
+function CrLua.LockTable.readOnlyRequireKey(tableName, table)
+    assert(type(tableName) == 'string' and type(table) == 'table')
+
+    local attrs = { CrLua.LockTable.ATTR.READ_ONLY, CrLua.LockTable.ATTR.REQUIRE_KEY }
+    return CrLua.LockTable._apply(tableName, attrs, table)
+end
+
+-------------------------------------------------------------------------------
+--- Require all table access read or write an existing key.
+-- @param table
+-- @param table : the same table as the argument for convenience assignment.
+-------------------------------------------------------------------------------
+function CrLua.LockTable.readWriteRequireKey(tableName, table)
+    assert(type(tableName) == 'string' and type(table) == 'table')
+
+    local attrs = { CrLua.LockTable.ATTR.REQUIRE_KEY }
+    return CrLua.LockTable._apply(tableName, attrs, table)
+end
+
+-- ############################################################################
+-- #### END #include <~/CrLua/LockTable>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/Log>
+-- ############################################################################
+
+-------------------------------------------------------------------------------
+--- Lua logging functions
+-- @author Darrell
+-------------------------------------------------------------------------------
+
+local TAG = 'CrLua.Log'
+
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.Log = assert(not CrLua.Log) and {
+    _require = {},
+    _data = {}
+}
+
+CrLua.Log.LOG_LEVEL = {
+    DEBUG = { level = 1, shortString = 'd' },
+    INFO = { level = 2, shortString = 'i' },
+    WARNING = { level = 3, shortString = 'w' },
+	ERROR = { level = 4, shortString = 'e' },
+    NONE = { level = 5, shortString = 'x' },
+}
+
+-- Store mutable level in a nested table to avoid mutating anything in Log.
+CrLua.Log._data.level = CrLua.Log.LOG_LEVEL.NONE
+
+-------------------------------------------------------------------------------
+--- Set the log level, only log messagees at this level and above.
+-- @param level table : CrLua.Log.LOG_LEVEL value.
+-------------------------------------------------------------------------------
+function CrLua.Log.setLogLevel(level)
+    assert(level and type(level.level) == 'number' and type(level.shortString) == 'string')
+    CrLua.Log._data.level = level
+end
+
+function CrLua.Log._logTable(message, table, depth)
+    assert(type(message) == 'string' and type(table) == 'table' and type(depth) == 'number')
+
+    local indent = '   '
+    local prefix = ''
+    if depth > 1 then
+        for i = 2, depth do
+            prefix = prefix .. indent
+        end
+    end
+    local indentedPrefix = prefix .. '   '
+
+    print(prefix .. message .. ' = {')
+    if depth < 4 then
+        for k, v in pairs(table) do
+            if type(v) == 'table' then
+                CrLua.Log._logTable(tostring(k), v, depth + 1)
+            else
+                print(indentedPrefix .. tostring(k) .. ' = ' .. tostring(v))
+            end
+        end
+    else
+        -- Stop once too deep (also prevents infinite loops if cycles).
+        print(indentedPrefix .. '...')
+    end
+    print(prefix .. '}')
+end
+
+function CrLua.Log._log(logLevel, tag, message, table)
+    -- Be verbose about bad arguments here, easy to pass the wrong item.
+    -- ALWAYS verify arguments even if log level will suppress logging,
+    -- otherwise bugs can creep in that only tickle when logging is enabled.
+    if type(tag) ~= 'string' then
+        error(TAG .. '_log: tag is not a string', 2)
+    elseif type(message) ~= 'string' then
+        error(TAG .. '_log: message is not a string', 2)
+    elseif table and type(table) ~= 'table' then
+        error(TAG .. '_log: table is not a table', 2)
+    end
+
+    if logLevel.level < CrLua.Log._data.level.level then
+        return
+    end
+
+    -- Insert the tag as message prefix.
+    message = tag .. ' ' .. message
+
+    -- Inject a [timestamp/level] prefix.
+    local timestamp = os.date('%I:%M.%S')
+    message = '[' .. timestamp .. '/' .. logLevel.shortString .. '] ' .. message
+
+    if table then
+        CrLua.Log._logTable(message, table, 1)
+    else
+        print(message)
+    end
+end
+
+-------------------------------------------------------------------------------
+--- Log a debug message.
+-- @param tag string.
+-- @param message string.
+-- @table optional table, logging contents if given.
+-------------------------------------------------------------------------------
+function CrLua.Log.d(tag, message, table)
+    CrLua.Log._log(CrLua.Log.LOG_LEVEL.DEBUG, tag, message, table)
+end
+
+-------------------------------------------------------------------------------
+--- Log an info message.
+-- @param tag string.
+-- @param message string.
+-- @table optional table, logging contents if given.
+-------------------------------------------------------------------------------
+function CrLua.Log.i(tag, message, table)
+    CrLua.Log._log(CrLua.Log.LOG_LEVEL.INFO, tag, message, table)
+end
+
+-------------------------------------------------------------------------------
+--- Log a warning message.
+-- @param tag string.
+-- @param message string.
+-- @table optional table, logging contents if given.
+-------------------------------------------------------------------------------
+function CrLua.Log.w(tag, message, table)
+    CrLua.Log._log(CrLua.Log.LOG_LEVEL.WARNING, tag, message, table)
+end
+
+-- ############################################################################
+-- #### END #include <~/CrLua/Log>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/TTS/HelperClient>
+-- ############################################################################
+
+-------------------------------------------------------------------------------
+--- Connect to a remote "Helper" object..
+-- @author Darrell
+-------------------------------------------------------------------------------
+
+local TAG = 'CrLua.TTS.HelperClient'
+
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.TTS = CrLua.TTS or {}
+CrLua.TTS.HelperClient = assert(not CrLua.TTS.HelperClient) and {
+    _require = {}
+}
+
+function CrLua.TTS.HelperClient.get(helperObjectName)
+    local function getHelperObject()
+        for _, object in ipairs(getAllObjects()) do
+            if object.getName() == helperObjectName then return object end
+        end
+        error('missing object "' .. helperObjectName .. '"')
+    end
+    local helperObject = false
+    local function getCallWrapper(functionName)
+        helperObject = helperObject or getHelperObject()
+        if not helperObject.getVar(functionName) then error('missing ' .. helperObjectName .. '.' .. functionName) end
+        return function(parameters) return helperObject.call(functionName, parameters) end
+    end
+    return setmetatable({}, { __index = function(t, k) return getCallWrapper(k) end })
+end
+
+-- ############################################################################
+-- #### END #include <~/CrLua/TTS/HelperClient>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/TTS/Overlap>
+-- ############################################################################
+
+--- Given a set of overlap destinations (say, cards) and sources (say, tokens),
+-- build a map from source to destinations it is inside wrt XZ plane.
+-- @author Darrell
+
+local TAG = 'CrLua.TTS.Overlap'
+
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.TTS = CrLua.TTS or {}
+CrLua.TTS.Overlap = assert(not CrLua.TTS.Overlap) and {
+    _require = {}
+}
+
+function CrLua.TTS.Overlap.overlap(srcs, dsts)
+    assert(type(srcs) == 'table' and type(dsts) == 'table')
+
+    -- Cheap but potentially wrong inside check.  It will never have a false
+    -- positive so use this first to eliminate quickly, then move on to the
+    -- more expensive check to be sure.
+    local function maybeInside(bb, p)
+        return p.x >= bb.min.x and p.x <= bb.max.x and p.z >= bb.min.z and p.z <= bb.max.z
+    end
+
+    -- This is a more expensive but more thorough "inside" test.
+    local function definitelyInside(src, dst)
+        -- Fill this is later if needed, the bb check is correct assuming
+        -- objects are at 90 degree rotations about Y.
+        return true
+    end
+
+    local dstToSrcs = {}
+    for _, dst in ipairs(dsts) do
+        -- Compute a bounding box to fast-fail things outside it.
+        local bounds = dst.getBounds()
+        local bb = {
+            min = {
+                x = bounds.center.x - bounds.size.x / 2,
+                z = bounds.center.z - bounds.size.z / 2,
+            },
+            max = {
+                x = bounds.center.x + bounds.size.x / 2,
+                z = bounds.center.z + bounds.size.z / 2,
+            }
+        }
+        for _, src in ipairs(srcs) do
+            if src ~= dst and maybeInside(bb, src.getPosition()) then
+                if definitelyInside(src, dst) then
+                    local srcs = dstToSrcs[dst]
+                    if not srcs then
+                        srcs = {}
+                        dstToSrcs[dst] = srcs
+                    end
+                    table.insert(srcs, src)
+                end
+            end
+        end
+    end
+    return dstToSrcs
+end
+
+-- ############################################################################
+-- #### END #include <~/CrLua/TTS/Overlap>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/TTS/Spreadsheet>
+-- ############################################################################
+
+-------------------------------------------------------------------------------
+--- Push updates to Google Sheets.
+-- @author Darrell
+-------------------------------------------------------------------------------
+
+local TAG = 'CrLua.TTS.Spreadsheet'
+
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.TTS = CrLua.TTS or {}
+CrLua.TTS.Spreadsheet = assert(not CrLua.TTS.Spreadsheet) and {
+    _require = { 'Log' }
+}
+
+-- Google Apps Script proxy that pushes updates to the editable sheet.
+CrLua.TTS.Spreadsheet.GAS_PROXY = 'https://script.google.com/macros/s/AKfycbzx5wxUv3BG6EiYfIv0mC9YNnEJKMkSNh0uYSOMJlGOjCJ8Ak2s/exec'
+
+local _idToCells = {}
+
+function CrLua.TTS.Spreadsheet.idFromUrl(url)
+    return string.match(url, '^http[s]://docs.google.com/spreadsheets/.*/(.*)/edit')
+end
+
+--- Push only changed cells to the sheet.
+function CrLua.TTS.Spreadsheet.update(label, id, sheet, cells)
+    assert(type(label) == 'string' and type(id) == 'string' and type(cells) == 'table')
+    assert(not sheet or type(sheet) == 'string')
+
+    -- Get the subset of changed cells.
+    local persistentKey = id .. '/' .. (sheet or '')
+    local persistentCells = _idToCells[persistentKey] or {}
+    local updatedCells = false
+    for k, v in pairs(cells) do
+        if persistentCells[k] ~= v then
+            updatedCells = updatedCells or {}
+            updatedCells[k] = v
+        end
+    end
+    for k, v in pairs(persistentCells) do
+        if not cells[k] and string.len(v) > 0 then
+            updatedCells = updatedCells or {}
+            updatedCells[k] = ''
+        end
+    end
+
+    -- Update persistent cells content ONLY ON SUCCESS.
+    local function callback(webRequest)
+        if webRequest.is_error or webRequest.text ~= 'ok' then
+            CrLua.Log.w(TAG, 'update "' .. label .. '" failed')
+        else
+            CrLua.Log.i(TAG, 'update "' .. label .. '" success')
+            for k, v in pairs(updatedCells) do
+                persistentCells[k] = v
+            end
+            _idToCells[persistentKey] = persistentCells
+        end
+    end
+
+    if updatedCells then
+        CrLua.Log.i(TAG, 'updating "' .. label .. '"')
+        local postData = {
+            id = id,
+            sheet = sheet,
+            cells = updatedCells,
+        }
+        --CrLua.Log.d(TAG, 'postData', postData)
+        WebRequest.post(CrLua.TTS.Spreadsheet.GAS_PROXY, JSON.encode(postData), callback)
+    else
+        CrLua.Log.i(TAG, 'no changes for "' .. label .. '", skipping update')
+    end
+end
+
+function CrLua.TTS.Spreadsheet.get(label, id, sheet, cell, callback)
+    assert(type(label) == 'string' and type(id) == 'string' and type(cell) == 'string')
+    assert(not sheet or type(sheet) == 'string')
+    assert(not callback or type(callback) == 'function')
+
+    local url = CrLua.TTS.Spreadsheet.GAS_PROXY
+    url = url .. '?id=' .. id
+    if sheet then
+        url = url .. '&sheet=' .. sheet
+    end
+    url = url .. '&cell=' .. cell
+
+    local function callbackWrapper(webRequest)
+        if webRequest.is_error then
+            CrLua.Log.w(TAG, 'get failed ("' .. label .. '")')
+        else
+            CrLua.Log.i(TAG, 'get success ("' .. label .. '")')
+        end
+        if callback then
+            callback(webRequest.text)
+        end
+    end
+
+    WebRequest.get(url, callbackWrapper)
+end
+
+-- ############################################################################
+-- #### END #include <~/CrLua/TTS/Spreadsheet>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/TI4/PlayerScore>
+-- ############################################################################
+
+--- Compute player scores.
+-- @author Darrell, Milty
+-- Assumes this score sheet for cells: https://docs.google.com/spreadsheets/d/1aIZZlwt8ePYxCVbxjNXjB5lMdl0kbyiTYU1Al8RUa4A/edit?usp=sharing
+
+local TAG = 'CrLua.TI4.PlayerScore'
+
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.TI4 = CrLua.TI4 or {}
+CrLua.TI4.PlayerScore = assert(not CrLua.TI4.PlayerScore) and {
+    _require = { 'List', 'TTS.HelperClient', 'TTS.Overlap' },
+    _allowMissingKeys = { 'PHASE1', 'PHASE2', 'SECRET', 'STRATEGY', 'AGENDA', 'ACTIONS' }
+}
+
+-- Use this value when no value for a field (e.g. no strategy card taken).
+CrLua.TI4.PlayerScore.MISSING = ''
+
+CrLua.TI4.PlayerScore.PHASE1 = {
+    ['Diversify Research'] = '2 TECH 2 COLORS',
+    ['Develop Weaponry'] = '2 UNIT UPGRADES',
+    ['Sway the Council'] = '8 INFLUENCE',
+    ['Erect a Monument'] = '8 RESOURCES',
+    ['Negotiate Trade Routes'] = '5 TRADE GOODS',
+    ['Lead From The Front'] = '3 COMMAND TOKENS',
+    ['Intimidate Council'] = '2 SYS ADJ TO MR',
+    ['Corner the Market'] = '4 PLANET SAME TRAIT',
+    ['Found Research Outposts'] = '3 TECH SPECIALTY',
+    ['Expand Borders'] = '6 NON-HOME PLANET',
+}
+
+CrLua.TI4.PlayerScore.PHASE2 = {
+    ['Master the Sciences'] = '2 TECH 4 COLORS',
+    ['Revolutionize Warfare'] = '3 UNIT UPGRADES',
+    ['Manipulate Galactic Law'] = '16 INFLUENCE',
+    ['Found a Golden Age'] = '16 RESOURCES',
+    ['Centralize Galatic Trade'] = '10 TRADE GOODS',
+    ['Galvanize the People'] = '6 COMMAND TOKENS',
+    ['Conquer the Weak'] = '1 OPPONENT HOME',
+    ['Unify the Colonies'] = '6 PLANET SAME TRAIT',
+    ['Form Galactic Brain Trust'] = '5 TECH SPECIALTY',
+    ['Subdue the Galaxy'] = '11 NON-HOME PLANET',
+}
+
+CrLua.TI4.PlayerScore.SECRET = {
+    ['Become the Gatekeeper'] = 'ALPHA AND BETA',
+    ['Mine Rare Metals'] = '4 HAZARDOUS',
+    ['Forge An Alliance'] = '4 CULTURAL',
+    ['Monopolize Production'] = '4 INDUSTRIAL',
+    ['Cut Supply Lines'] = 'BLOCKADE SD',
+    ['Occupy the Seat of the Empire'] = 'MR W/ 3 SHIPS',
+    ['Learn Secrets of the Cosmos'] = '3 ADJ TO ANOMALY',
+    ['Control the Region'] = '6 SYSTEMS',
+    ['Threaten Enemies'] = 'SYS ADJ TO HOME',
+    ['Adapt New Strategies'] = '2 FACTION TECH',
+    ['Master the Laws of Physics'] = '4 TECH 1 COLOR',
+    ['Gather A Mighty Fleet'] = '5 DREADNOUGHTS',
+    ['Form a Spy Network'] = '5 ACTION CARDS',
+    ['Fuel the War Machine'] = '3 SPACE DOCKS',
+    ['Establish A Perimeter'] = '4 PDS',
+    ['Make an Example of Their World'] = 'BOMBARD LAST GF',
+    ['Turn Their Fleets to Dust'] = 'SPC LAST SHIP',
+    ['Destroy Their Greatest Ship'] = 'DESTORY WS/FLAG',
+    ['Unveil Flagship'] = 'WIN W/ FLAGSHIP',
+    ['Spark a Rebellion'] = 'WIN VS LEADER',
+}
+
+CrLua.TI4.PlayerScore.AGENDA = {
+    ['Shard of the Throne'] = 'SHARD of the THRONE',
+    ['The Crown of Emphidia'] = 'CROWN of EMPHIDIA',
+    ['Holy Planet of Ixth'] = 'HOLY PLANET of IXTH',
+    ['Seed of an Empire'] = 'SEED of an EMPIRE',
+    ['Mutiny'] = 'MUTINY +1/-1',
+}
+
+CrLua.TI4.PlayerScore.STRATEGY = {
+    ['Leadership'] = 'Leadership',
+    ['Diplomacy'] = 'Diplomacy',
+    ['Diplomacy (Revised)'] = 'Diplomacy',
+    ['Politics'] = 'Politics',
+    ['Construction'] = 'Construction',
+    ['Trade'] = 'Trade',
+    ['Warfare'] = 'Warfare',
+    ['Technology'] = 'Technology',
+    ['Imperial'] = 'Imperial',
+}
+
+CrLua.TI4.PlayerScore.SUPPORTS = {
+    ['Support for the Throne (Blue)'] = 'SUPPORT for the THRONE',
+    ['Support for the Throne (Purple)'] = 'SUPPORT for the THRONE',
+    ['Support for the Throne (Yellow)'] = 'SUPPORT for the THRONE',
+    ['Support for the Throne (Red)'] = 'SUPPORT for the THRONE',
+    ['Support for the Throne (Green)'] = 'SUPPORT for the THRONE',
+    ['Support for the Throne (White)'] = 'SUPPORT for the THRONE'
+}
+
+CrLua.TI4.PlayerScore.ACTIONS = {
+    ['Imperial Rider'] = 'IMPERIAL RIDER'
+}
+
+CrLua.TI4.PlayerScore.factionNicknames = {
+    ['The Arborec'] = 'Arborec',
+    ['The Barony Of Letnev'] = 'Letnev',
+    ['The Clan Of Saar'] = 'Saar',
+    ['The Embers Of Muaat'] = 'Muaat',
+    ['The Emirates Of Hacan'] = 'Hacan',
+    ['The Federation Of Sol'] = 'Sol',
+    ['The Ghosts Of Creuss'] = 'Creuss',
+    ['The L1Z1X Mindnet'] = 'L1Z1X',
+    ['The Mentak Coalition'] = 'Mentak',
+    ['The Naalu Collective'] = 'Naalu',
+    ['The Nekro Virus'] = 'Nekro',
+    ["The Sardakk N'orr"] = "N'orr",
+    ['The Universities of Jol-Nar'] = 'Jol-Nar',
+    ['The Winnu'] = 'Winnu',
+    ['The Xxcha Kingdom'] = 'Xxcha',
+    ['The Yin Brotherhood'] = 'Yin',
+    ['The Yssaril Tribes'] = 'Yssaril',
+}
+
+CrLua.TI4.PlayerScore.colorAbbreviation = {
+    ['Blue'] = 'U',
+    ['Purple'] = 'P',
+    ['Yellow'] = 'Y',
+    ['Red'] = 'R',
+    ['Green'] = 'G',
+    ['White'] = 'B',
+    ['Orange'] = 'O',
+    ['Pink'] = 'K',
+}
+
+CrLua.TI4.PlayerScore.MECATOL = 'Custodians'
+CrLua.TI4.PlayerScore.SCOREBOARD = 'Scoreboard'
+
+local _factionHelper = CrLua.TTS.HelperClient.get('TI4_FACTION_HELPER')
+local _zoneHelper = CrLua.TTS.HelperClient.get('TI4_ZONE_HELPER')
+
+local _custodians = false
+
+--- Get map from scoring relevant object name to lists of objects with name.
+function CrLua.TI4.PlayerScore.getNameToScoreObjects()
+    local keysAreObjectNames = {
+        CrLua.TI4.PlayerScore.PHASE1,
+        CrLua.TI4.PlayerScore.PHASE2,
+        CrLua.TI4.PlayerScore.SECRET,
+        CrLua.TI4.PlayerScore.AGENDA,
+        CrLua.TI4.PlayerScore.STRATEGY,
+        CrLua.TI4.PlayerScore.SUPPORTS,
+        CrLua.TI4.PlayerScore.ACTIONS,
+        { [CrLua.TI4.PlayerScore.MECATOL] = true },
+        { [CrLua.TI4.PlayerScore.SCOREBOARD] = true },
+    }
+
+    local nameToScoreObjects = {}
+    for _, useKeys in ipairs(keysAreObjectNames) do
+        for k, _ in pairs(useKeys) do
+            nameToScoreObjects[k] = {}
+        end
+    end
+
+    for color, faction in pairs(_factionHelper.allFactions()) do
+        local name = faction.tokenName .. ' Owner Token'
+        nameToScoreObjects[name] = {}
+    end
+
+    for _, object in ipairs(getAllObjects()) do
+        if object.tag ~= 'Card' or object.is_face_down == false then
+            local objects = nameToScoreObjects[object.getName()]
+            if objects then
+                table.insert(objects, object)
+                if object.getName() == CrLua.TI4.PlayerScore.MECATOL then
+                    _custodians = object
+                end
+            end
+        end
+    end
+
+    local nonEmpty = {}
+    for k, v in pairs(nameToScoreObjects) do
+        if #v > 0 then
+            nonEmpty[k] = v
+        end
+    end
+    return nonEmpty
+end
+
+--- Get map from scoring relevant object name to list of owner tokens on it.
+function CrLua.TI4.PlayerScore.nameToOwnerTokens(nameToScoreObjects)
+    assert(type(nameToScoreObjects) == 'table')
+
+    local srcs = {}
+    local dsts = {}
+    for name, objects in pairs(nameToScoreObjects) do
+        if string.find(name, ' Owner Token$') then
+            srcs = CrLua.List.join(srcs, objects)
+        else
+            dsts = CrLua.List.join(dsts, objects)
+        end
+    end
+    local dstToSrcs = CrLua.TTS.Overlap.overlap(srcs, dsts)
+
+    local nameToOwnerTokens = {}
+    for dst, srcs in pairs(dstToSrcs) do
+        local name = dst.getName()
+        nameToOwnerTokens[name] = CrLua.List.join(nameToOwnerTokens[name] or {}, srcs)
+    end
+    return nameToOwnerTokens
+end
+
+function CrLua.TI4.PlayerScore.score(scoreboard, ownerToken)
+    assert(type(scoreboard) == 'userdata' and type(ownerToken) == 'userdata')
+
+    -- Scoreboard local space x.
+    local p = scoreboard.positionToLocal(ownerToken.getPosition())
+    local u = -(p.x - 3.25) / 6.5
+    local limit = 11
+    if scoreboard.is_face_down then
+        u = 1 - u
+        limit = 15
+    end
+    return math.floor(u * limit)
+end
+
+function CrLua.TI4.PlayerScore.colorToScore(nameToScoreObjects, nameToOwnerTokens)
+    assert(#nameToScoreObjects[CrLua.TI4.PlayerScore.SCOREBOARD] == 1)
+    local scoreboard = nameToScoreObjects[CrLua.TI4.PlayerScore.SCOREBOARD][1]
+    assert(scoreboard)
+    local ownerTokens = nameToOwnerTokens[CrLua.TI4.PlayerScore.SCOREBOARD] or {}
+
+    -- The scoreboard bounding box is larger than the image.  Prune out extras.
+    if #ownerTokens > 0 then
+        for i = #ownerTokens, 1, -1 do
+            local center = ownerTokens[i].getPosition()
+            local p = scoreboard.positionToLocal(center)
+            if math.abs(p.z) > 0.5 then
+                table.remove(ownerTokens, i)
+            elseif p.x < -3.3 or p.x > 3.3 then
+                table.remove(ownerTokens, i)
+            end
+        end
+    end
+
+    local ownerTokenNameToColor = {}
+    for color, faction in pairs(_factionHelper.allFactions()) do
+        local name = faction.tokenName .. ' Owner Token'
+        ownerTokenNameToColor[name] = color
+    end
+
+    local colorToScore = {}
+    for _, ownerToken in ipairs(ownerTokens) do
+        local color = ownerTokenNameToColor[ownerToken.getName()]
+        assert(color)
+        local score = CrLua.TI4.PlayerScore.score(scoreboard, ownerToken)
+        colorToScore[color] = math.max(colorToScore[color] or 0, score)
+    end
+    return colorToScore
+end
+
+-------------------------------------------------------------------------------
+
+function CrLua.TI4.PlayerScore.setCellsPlayerNames(cells)
+    assert(type(cells) == 'table')
+    local colorToCellName = {
+        ['Blue'] = 'B3',
+        ['Purple'] = 'B4',
+        ['Yellow'] = 'B5',
+        ['Red'] = 'O3',
+        ['Green'] = 'O4',
+        ['White'] = 'O5',
+        --['Orange'] = 'H',
+        --['Pink'] = 'I',
+    }
+    for color, nameCell in pairs(colorToCellName) do
+        -- Not safe to access missing colors, scan.
+        local function steamName()
+            for _, player in ipairs(Player.getPlayers()) do
+                if player.color == color then
+                    return player.steam_name
+                end
+            end
+        end
+        cells[nameCell] = steamName() or CrLua.TI4.PlayerScore.MISSING
+    end
+end
+
+function CrLua.TI4.PlayerScore.setCellsFactions(cells)
+    assert(type(cells) == 'table')
+    local colorToCellFaction = {
+        ['Blue'] = 'F3',
+        ['Purple'] = 'F4',
+        ['Yellow'] = 'F5',
+        ['Red'] = 'S3',
+        ['Green'] = 'S4',
+        ['White'] = 'S5',
+        --['Orange'] = 'H',
+        --['Pink'] = 'I',
+    }
+    for color, factionCell in pairs(colorToCellFaction) do
+        local faction = _factionHelper.fromColor(color)
+        local factionNickname = faction and CrLua.TI4.PlayerScore.factionNicknames[faction.name]
+        cells[factionCell] = factionNickname or CrLua.TI4.PlayerScore.MISSING
+    end
+end
+
+function CrLua.TI4.PlayerScore.setCellsStrategyCards(cells, colorToStrategy)
+    assert(type(cells) == 'table')
+    local colorToCellStrategy = {
+        ['Blue'] = 'K3',
+        ['Purple'] = 'K4',
+        ['Yellow'] = 'K5',
+        ['Red'] = 'X3',
+        ['Green'] = 'X4',
+        ['White'] = 'X5',
+        --['Orange'] = 'H',
+        --['Pink'] = 'I',
+    }
+    for color, strategyCell in pairs(colorToCellStrategy) do
+        local strategy = colorToStrategy[color]
+        cells[strategyCell] = strategy and CrLua.TI4.PlayerScore.STRATEGY[strategy] or CrLua.TI4.PlayerScore.MISSING
+    end
+end
+
+function CrLua.TI4.PlayerScore.setCellsScores(cells, colorToScore)
+    assert(type(cells) == 'table' and type(colorToScore) == 'table')
+    local colorToCellScore = {
+        ['Blue'] = 'J3',
+        ['Purple'] = 'J4',
+        ['Yellow'] = 'J5',
+        ['Red'] = 'W3',
+        ['Green'] = 'W4',
+        ['White'] = 'W5',
+        --['Orange'] = 'H',
+        --['Pink'] = 'I',
+    }
+    for color, scoreCell in pairs(colorToCellScore) do
+        cells[scoreCell] = colorToScore[color] or 0
+    end
+end
+
+function CrLua.TI4.PlayerScore.setCellsPublicObjectivesAndRound(cells, PHASE1objectives, PHASE2objectives, stageOneMap, stageTwoMap)
+    assert(type(cells) == 'table' and type(PHASE1objectives) == 'table' and type(PHASE2objectives) == 'table')
+    local stageOneCells = {
+        'B7', 'B8', 'B9', 'B10', 'B11', 'B20',
+    }
+    local stageTwoCells = {
+        'B14', 'B15', 'B16', 'B17', 'B18', 'B21',
+    }
+    local PublicCompletionCells = {
+        ['Blue'] = 'G',
+        ['Purple'] = 'H',
+        ['Yellow'] = 'I',
+        ['Red'] = 'J',
+        ['Green'] = 'K',
+        ['White'] = 'L',
+        --['Orange'] = '',
+        --['Pink'] = 'I',
+    }
+    local RoundCell = 'O1'
+
+    local round = (#PHASE1objectives + #PHASE2objectives) - 1
+    for _, object in ipairs(getAllObjects()) do
+        if object.getName() == 'Incentive Program' and not object.is_face_down then
+            round = round - 1
+        end
+    end
+    cells[RoundCell] = math.max(round, 1)
+
+    for _, cell in ipairs(stageOneCells) do
+        cells[cell] = ''
+        local row = string.match(cell, '^%a+(%d+)$')
+        for _, col in pairs(PublicCompletionCells) do
+            cells[ col .. row ] = ''
+        end
+    end
+    for i, val in ipairs(PHASE1objectives) do
+        local cell = stageOneCells[i]
+        cells[cell] = CrLua.TI4.PlayerScore.PHASE1[val]
+        local completed = stageOneMap[val]
+        if completed then
+            local row = string.match(cell, '^%a+(%d+)$')
+            for _, color in ipairs(completed) do
+                local col = PublicCompletionCells[color]
+                local value = CrLua.TI4.PlayerScore.colorAbbreviation[color]
+                if col and row and value then
+                    cells[ col .. row ] = value
+                end
+            end
+        end
+    end
+
+    for _, cell in ipairs(stageTwoCells) do
+        cells[cell] = ''
+        local row = string.match(cell, '^%a+(%d+)$')
+        for _, col in pairs(PublicCompletionCells) do
+            cells[ col .. row ] = ''
+        end
+    end
+    for i, val in ipairs(PHASE2objectives) do
+        local cell = stageTwoCells[i]
+        cells[cell] = CrLua.TI4.PlayerScore.PHASE2[val]
+        local completed = stageTwoMap[val]
+        if completed then
+            local row = string.match(cell, '^%a+(%d+)$')
+            for _, color in ipairs(completed) do
+                local col = PublicCompletionCells[color]
+                local value = CrLua.TI4.PlayerScore.colorAbbreviation[color]
+                if col and row and value then
+                    cells[ col .. row ] = value
+                end
+            end
+        end
+    end
+end
+
+function CrLua.TI4.PlayerScore.setCellsSecretObjectives(cells, secretsOrder, playerSecrets)
+    assert(type(cells) == 'table' and type(secretsOrder) == 'table' and type(playerSecrets) == 'table')
+    local secretsCells = {
+        { 'M7', 'R7' },
+        { 'M8', 'R8' },
+        { 'M9', 'R9' },
+        { 'M10', 'R10' },
+        { 'M11', 'R11' },
+        { 'M12', 'R12' },
+        { 'M13', 'R13' },
+        { 'M14', 'R14' },
+        { 'M15', 'R15' },
+        { 'M16', 'R16' },
+        { 'M17', 'R17' },
+        { 'M18', 'R18' },
+        { 'M19', 'R19' },
+        { 'M20', 'R20' },
+        { 'M21', 'R21' },
+        { 'M22', 'R22' },
+        { 'M23', 'R23' },
+        { 'M24', 'R24' },
+    }
+    for _, cellPair in ipairs(secretsCells) do
+        cells[cellPair[1]] = ''
+        cells[cellPair[2]] = ''
+    end
+    for i, secret in ipairs(secretsOrder) do
+        local color = assert(playerSecrets[secret])
+        cells[secretsCells[i][1]] = CrLua.TI4.PlayerScore.SECRET[secret]
+        cells[secretsCells[i][2]] = CrLua.TI4.PlayerScore.colorAbbreviation[color]
+    end
+end
+
+function CrLua.TI4.PlayerScore.setCellsSupport(cells, supportMap)
+    local SupportCells = {
+        ['Blue'] = 'X8',
+        ['Purple'] = 'X10',
+        ['Yellow'] = 'X12',
+        ['Red'] = 'X11',
+        ['Green'] = 'X9',
+        ['White'] = 'X7',
+        --['Orange'] = 'H',
+        --['Pink'] = 'I',
+    }
+    for _, cell in pairs(SupportCells) do
+        cells[cell] = ''
+    end
+    for owner, target in pairs(supportMap) do
+        cells[SupportCells[owner]] = CrLua.TI4.PlayerScore.colorAbbreviation[target]
+    end
+end
+
+function CrLua.TI4.PlayerScore.setCellsMecatol(cells, MecatolPoints)
+    local MecatolCells = {'G12', 'G13', 'H13', 'I13', 'J13', 'K13', 'L13'}
+    for _, cell in ipairs(MecatolCells) do
+        cells[cell] = ''
+    end
+    for i, color in ipairs(MecatolPoints) do
+        cells[MecatolCells[i]] = CrLua.TI4.PlayerScore.colorAbbreviation[color]
+    end
+end
+
+function CrLua.TI4.PlayerScore.setCellsOther(cells, otherPoints)
+    local OtherPointCells = {
+        ['Imperial Rider'] = 'X13',
+        ['single'] = {
+            {'S14', 'X14'},
+            {'S15', 'X15'},
+            {'S16', 'X16'},
+            {'S17', 'X17'}
+        },
+        ['multi'] = {
+            {
+                nameCell = 'S18',
+                colorCell = {
+                    Blue = 'S19',
+                    Purple = 'T19',
+                    Yellow = 'U19',
+                    Red = 'V19',
+                    Green = 'W19',
+                    White = 'X19',
+                }
+            }
+        }
+    }
+    for _, cellPair in ipairs(OtherPointCells.single) do
+        cells[cellPair[1]] = ''
+        cells[cellPair[2]] = ''
+    end
+    for _, multi in ipairs(OtherPointCells['multi']) do
+        cells[multi.nameCell] = ''
+    end
+    local singlePointCount = 0
+    local multiPointCount = 0
+    for key, map in pairs(otherPoints) do
+        if key == 'Shard of the Throne' or key == 'The Crown of Emphidia' or key == 'Holy Planet of Ixth' then
+            singlePointCount = singlePointCount + 1
+            local cellNameAndColor = OtherPointCells.single[singlePointCount]
+            if cellNameAndColor and #map > 0 then
+                cells[cellNameAndColor[1]] = CrLua.TI4.PlayerScore.AGENDA[key]
+                cells[cellNameAndColor[2]] = CrLua.TI4.PlayerScore.colorAbbreviation[map[1]]
+            end
+        elseif key == 'Imperial Rider' then
+            if map ~= {} then cells[OtherPointCells[key]] = CrLua.TI4.PlayerScore.colorAbbreviation[map[1]] end
+        else
+            multiPointCount = multiPointCount + 1
+            local multi = OtherPointCells['multi'][multiPointCount]
+            if multi then
+                cells[multi.nameCell] = CrLua.TI4.PlayerScore.AGENDA[key]
+                for _, color in ipairs(map) do
+                    cells[multi.colorCell[color]] = CrLua.TI4.PlayerScore.colorAbbreviation[color]
+                end
+            end
+        end
+    end
+end
+
+-------------------------------------------------------------------------------
+
+function CrLua.TI4.PlayerScore.updatePublicOneObjectives(PHASE1objectives, nameToScoreObjects)
+    assert(type(PHASE1objectives) == 'table')
+
+    local stageOne = {}
+
+    for name, scoreObjects in pairs(nameToScoreObjects) do
+        local objective = CrLua.TI4.PlayerScore.PHASE1[name]
+        if objective then table.insert(stageOne, name) end
+    end
+
+    local oldPHASE1 = PHASE1objectives or {}
+    local newPHASE1 = stageOne or {}
+    local updatedPHASE1 = CrLua.List.pruneAndAppendMissing(oldPHASE1, newPHASE1) or {}
+
+    return updatedPHASE1
+end
+
+function CrLua.TI4.PlayerScore.updatePublicTwoObjectives(PHASE2objectives, nameToScoreObjects)
+    assert(type(PHASE2objectives) == 'table')
+
+    local stageTwo = {}
+
+    for name, scoreObjects in pairs(nameToScoreObjects) do
+        local objective = CrLua.TI4.PlayerScore.PHASE2[name]
+        if objective then table.insert(stageTwo, name) end
+    end
+
+    local oldPHASE2 = PHASE2objectives or {}
+    local newPHASE2 = stageTwo or {}
+    local updatedPHASE2 = CrLua.List.pruneAndAppendMissing(oldPHASE2, newPHASE2) or {}
+
+    return updatedPHASE2
+end
+
+function CrLua.TI4.PlayerScore.updateSecrets(secretsOrder, playerSecrets, nameToOwnerTokens)
+    assert(type(secretsOrder) == 'table' and type(playerSecrets) == 'table')
+
+    -- Map from secret name to owning player color.
+    local updated = {}
+    local newOrder = {}
+    for name, ownerTokens in pairs(nameToOwnerTokens) do
+        if CrLua.TI4.PlayerScore.SECRET[name] then
+            -- Tolerate accidentally putting multiple tokens from the same player.
+            local ownerSet = {}
+            for _, ownerToken in ipairs(ownerTokens) do
+                local faction = _factionHelper.fromTokenName(ownerToken.getName())
+                if faction and faction.color then
+                    ownerSet[faction.color] = true
+                end
+            end
+            local ownersList = CrLua.List.fromKeys(ownerSet)
+
+            if #ownersList == 1 then
+                table.insert(newOrder, name)
+                updated[name] = ownersList[1]
+            end
+        end
+    end
+
+    newOrder = CrLua.List.pruneAndAppendMissing(secretsOrder, newOrder)
+    return newOrder, updated
+end
+
+function CrLua.TI4.PlayerScore.mapStageOne(nameToOwnerTokens)
+    local stageOneMap = {}
+    for name, ownerTokens in pairs(nameToOwnerTokens) do
+        if CrLua.TI4.PlayerScore.PHASE1[name] then
+            local tokenMap = {}
+            for i, ownerToken in ipairs(ownerTokens) do
+                local faction = _factionHelper.fromTokenName(ownerToken.getName())
+                local playerColor = faction and faction.color
+                if playerColor then
+                    table.insert(tokenMap, playerColor)
+                end
+            end
+            stageOneMap[name] = tokenMap
+        end
+    end
+    return stageOneMap
+end
+
+function CrLua.TI4.PlayerScore.mapStageTwo(nameToOwnerTokens)
+    local stageTwoMap = {}
+    for name, ownerTokens in pairs(nameToOwnerTokens) do
+        if CrLua.TI4.PlayerScore.PHASE2[name] then
+            local tokenMap = {}
+            for i, ownerToken in ipairs(ownerTokens) do
+                local faction = _factionHelper.fromTokenName(ownerToken.getName())
+                local playerColor = faction and faction.color
+                if playerColor then
+                    table.insert(tokenMap, playerColor)
+                end
+            end
+            stageTwoMap[name] = tokenMap
+        end
+    end
+    return stageTwoMap
+end
+
+function CrLua.TI4.PlayerScore.updateStrategy()
+    local guidToName = {}
+    local guidToPosition = {}
+    for _, object in ipairs(getAllObjects()) do
+        local name = object.getName()
+        if CrLua.TI4.PlayerScore.STRATEGY[name] then
+            local guid = object.getGUID()
+            guidToName[guid] = name
+            guidToPosition[guid] = object.getPosition()
+        end
+    end
+
+    local guidToZone = _zoneHelper.zonesFromPositions(guidToPosition)
+    local colorToStrategy = {}
+
+    for guid, color in pairs(guidToZone) do
+        local strategy = assert(guidToName[guid])
+        if strategy then colorToStrategy[color] = strategy end
+    end
+
+    return colorToStrategy
+end
+
+function CrLua.TI4.PlayerScore.mapSupports(nameToOwnerTokens)
+    local supportMap = {}
+    for key, map in pairs(nameToOwnerTokens) do
+        local color = string.match(key, '^Support for the Throne %((%a+)%)$')
+        if color then
+            local ownerToken = map[1].getName()
+            local faction = _factionHelper.fromTokenName(ownerToken)
+            local playerColor = faction.color
+            if playerColor then
+                supportMap[color] = playerColor
+            end
+        end
+    end
+    return supportMap
+end
+
+function CrLua.TI4.PlayerScore.getMecatolPoints(currentMecatolPoints, nameToOwnerTokens)
+    assert(type(currentMecatolPoints) == 'table')
+
+    local MecatolPoints = {}
+
+    -- The Custodians Token bounds are a little too large.  Restrict further.
+    local function insideCustodians(ownerToken)
+        if not _custodians then
+            return true
+        end
+        local p1 = ownerToken.getPosition()
+        local p2 = _custodians.getPosition()
+        local d = math.sqrt((p1.x - p2.x) ^ 2 + (p1.z - p2.z) ^ 2)
+        return d < 1.5
+    end
+
+    local map = nameToOwnerTokens[CrLua.TI4.PlayerScore.MECATOL] or {}
+    for i, token in ipairs(map) do
+        local ownerToken = map[i].getName()
+        local faction = _factionHelper.fromTokenName(ownerToken)
+        local playerColor = faction and faction.color
+        if playerColor and insideCustodians(token) then
+            table.insert(MecatolPoints, playerColor)
+        end
+    end
+
+    local oldPoints = currentMecatolPoints or {}
+    local newPoints = MecatolPoints or {}
+    local updatedPoints = CrLua.List.pruneAndAppendMissing(oldPoints, newPoints) or {}
+
+    return updatedPoints
+end
+
+function CrLua.TI4.PlayerScore.mapOtherPoints(currentOtherPoints, nameToOwnerTokens)
+    assert(type(currentOtherPoints) == 'table')
+
+    local otherPoints = {}
+
+    for key, map in pairs(nameToOwnerTokens) do
+        if CrLua.TI4.PlayerScore.AGENDA[key] or CrLua.TI4.PlayerScore.ACTIONS[key] then
+            if #map ~= 0 then otherPoints[key] = {} end
+            for i, token in ipairs(map) do
+                local ownerToken = map[i].getName()
+                local faction = _factionHelper.fromTokenName(ownerToken)
+                local playerColor = faction.color
+                if playerColor then
+                    table.insert(otherPoints[key], playerColor)
+                end
+            end
+        end
+    end
+
+    local updatedPoints = {}
+    for key, pointList in pairs(otherPoints) do
+        local oldList = currentOtherPoints[key] or {}
+        local newList = otherPoints[key] or {}
+        local updatedList = CrLua.List.pruneAndAppendMissing(oldList, newList)
+        updatedPoints[key] = updatedList
+    end
+    return updatedPoints
+end
+
+-- ############################################################################
+-- #### END #include <~/CrLua/TI4/PlayerScore>
+-- ############################################################################
+
+-- ############################################################################
+-- #### START #include <~/CrLua/TI4/PlayerTech>
+-- ############################################################################
+
+--- Keep track of each players' tech, and acquisition order.
+-- @author Darrell
+--
+-- Assumes Nekro makes a copy of assimilated technology cards.
+-------------------------------------------------------------------------------
+
+local TAG = 'CrLua.TI4.PlayerTech'
+
+CrLua = CrLua or {}  -- global, <include> wraps in a do .. end block
+CrLua.TI4 = CrLua.TI4 or {}
+CrLua.TI4.PlayerTech = assert(not CrLua.TI4.PlayerTech) and {
+    _require = { 'List', 'TTS.HelperClient' },
+    _allowMissingKeys = { 'TECHNOLOGIES' }
+}
+
+-- Map from card name to streamer tech sheet text.
+CrLua.TI4.PlayerTech.TECHNOLOGIES = {
+    ['Advanced Carrier II'] = 'Adv Carrier II',
+    ['Antimass Deflectors'] = 'Antimass',
+    ['Assault Cannon'] = 'Assault Cannon',
+    ['Bioplasmosis'] = 'Bioplas',
+    ['Carrier II'] = 'Carrier II',
+    ['Chaos Mapping'] = 'Chaos Map',
+    ['Cruiser II'] = 'Cruiser II',
+    ['Dacxive Animators'] = 'Dacxive',
+    ['Destroyer II'] = 'Destroyer II',
+    ['Dimensional Splicer'] = 'D. Splicer',
+    ['Dreadnought II'] = 'Dread II',
+    ['Duranium Armor'] = 'Duranium',
+    ['E-res Siphons'] = 'E-Res',
+    ['Exotrireme II'] = 'Exotrireme II',
+    ['Fighter II'] = 'Fighter II',
+    ['Fleet Logistics'] = 'Fleet Logistics',
+    ['Floating Factory II'] = 'FF II',
+    ['Graviton Laser System'] = 'Graviton',
+    ['Gravity Drive'] = 'Grav Drive',
+    ['Hegemonic Trade Policy'] = 'Hegemonic',
+    ['Hybrid Crystal Fighter II'] = 'HCF II',
+    ['Hyper Metabolism'] = 'Hyper',
+    ['Impulse Core'] = 'Impulse',
+    ['Infantry II'] = 'Infantry II',
+    ['Inheritance Systems'] = 'Inherit. Systems',
+    ['Instinct Training'] = 'Instinct Train',
+    ['Integrated Economy'] = 'Integrated Eco.',
+    ['L4 Disruptors'] = 'L4 Disrupt',
+    ['Lazax Gate Folding'] = 'Lazax Gate',
+    ['Letani Warrior II'] = 'Letani II',
+    ['Light-Wave Deflector'] = 'Light/Wave',
+    ['Magen Defense Grid'] = 'Magen',
+    ['Mageon Implants'] = 'Mageon',
+    ['Magmus Reactor'] = 'Magmus',
+    ['Mirror Computing'] = 'Mirror Comp',
+    ['Neural Motivator'] = 'Neural',
+    ['Neuroglaive'] = 'Neuroglaive',
+    ['Non-Euclidean Shielding'] = 'N.E.S.',
+    ['Nullification Field'] = 'Null. Field',
+    ['PDS II'] = 'PDS II',
+    ['Plasma Scoring'] = 'Plasma',
+    ['Production Biomes'] = 'Prod. Biomes',
+    ['Prototype War Sun II'] = 'PWS II',
+    ['Quantum Datahub Node'] = 'QDHN',
+    ['Salvage Operations'] = 'Salvage Ops.',
+    ['Sarween Tools'] = 'Sarween',
+    ['Space Dock II'] = 'Space Dock II',
+    ['Spacial Conduit Cylinder'] = 'Spacial Conduit',
+    ['Spec Ops II'] = 'Spec Ops II',
+    ['Super-Dreadnought II'] = 'SuperDread II',
+    ['Transit Diodes'] = 'Transit',
+    ['Transparasteel Plating'] = 'Transparasteel',
+    ['Valefar Assimilator X'] = nil,
+    ['Valefar Assimilator Y'] = nil,
+    ['Valkyrie Particle Weave'] = 'Valkyrie PW',
+    ['War Sun'] = 'War Sun',
+    ['Wormhole Generator'] = 'Wormhole Gen',
+    ['X-89 Bacterial Weapon Ω'] = 'X-89 B.W.',
+    ['X-89 Bacterial Weapon'] = 'X-89 B.W.',
+    ['Yin Spinner'] = 'Yin Spin',
+    ['????_REDACTED_????'] = 'Scenario Destroyer',
+    ['???_EXCEPTION_NO_ID_???'] = 'Scenario Tech'
+}
+
+local _factionHelper = CrLua.TTS.HelperClient.get('TI4_FACTION_HELPER')
+local _zoneHelper = CrLua.TTS.HelperClient.get('TI4_ZONE_HELPER')
+
+-------------------------------------------------------------------------------
+
+--- Maintain per-player technologies, preserving add order.
+-- @param playerColorToTechs table : map from player color to in-order tech list.
+-- @return table : updated map from player color to in-order tech list.
+function CrLua.TI4.PlayerTech.updateAllPlayersToTech(playerColorToTechs)
+    assert(type(playerColorToTechs) == 'table')
+
+    local guidToName = {}
+    local guidToPosition = {}
+    for _, object in ipairs(getAllObjects()) do
+        local name = object.getName()
+        if CrLua.TI4.PlayerTech.TECHNOLOGIES[name] then
+            local guid = object.getGUID()
+            guidToName[guid] = name
+            guidToPosition[guid] = object.getPosition()
+        end
+    end
+
+    local guidToZone = _zoneHelper.zonesFromPositions(guidToPosition)
+    local colorToTechs = {}
+
+    for guid, color in pairs(guidToZone) do
+        local entry = colorToTechs[color]
+        if not entry then
+            entry = {}
+            colorToTechs[color] = entry
+        end
+        local tech = assert(guidToName[guid])
+        table.insert(entry, tech)
+    end
+
+    local prunedColorToTechs = {}
+    for color, techList in pairs(colorToTechs) do
+        prunedColorToTechs[color] = CrLua.List.unique(techList)
+    end
+
+    local updated = {}
+    for color, _ in pairs(_factionHelper.allFactions()) do
+        local oldTechs = playerColorToTechs[color] or {}
+        local newTechs = prunedColorToTechs[color] or {}
+        local updatedTechs = CrLua.List.pruneAndAppendMissing(oldTechs, newTechs)
+        updated[color] = updatedTechs
+    end
+    return updated
+end
+
+-------------------------------------------------------------------------------
+
+--- Generate the entire spreadsheet contents.
+function CrLua.TI4.PlayerTech.getCells(playerColorToTechs)
+    local cells = {}
+    local colorToColumn = {
+        Blue = 'B',
+        Purple = 'C',
+        Yellow = 'D',
+        Red = 'E',
+        Green = 'F',
+        White = 'G',
+        --Orange = 'H',
+        --Pink = 'I',
+    }
+    for color, col in pairs(colorToColumn) do
+        cells[col .. 3] = 'N/A'
+        cells[col .. 4] = ''
+    end
+    for _, player in ipairs(Player.getPlayers()) do
+        local col = player.color and colorToColumn[player.color]
+        if col then
+            cells[col .. 3] = player.steam_name
+        end
+    end
+    for color, techs in pairs(playerColorToTechs) do
+        local col = colorToColumn[color]
+        if col then
+            for i, tech in ipairs(techs) do
+                cells[col .. (i + 3)] = CrLua.TI4.PlayerTech.TECHNOLOGIES[tech]
+            end
+        end
+    end
+    return cells
+end
+
+-------------------------------------------------------------------------------
+
+-- ############################################################################
+-- #### END #include <~/CrLua/TI4/PlayerTech>
+-- ############################################################################
+
+--#include <~/CrLua/UnitTest>
+--CrLua.UnitTest.runTests('CrLua', CrLua, true)
+
+CrLua.Log.setLogLevel(CrLua.Log.LOG_LEVEL.WARNING)
+
+CrLua.assertRequired({ 'TI4.PlayerScore', 'TI4.PlayerTech', 'TTS.Spreadsheet' })
+CrLua.lock()
+
+-- ############################################################################
+-- #### END #include <~/CrLua/Objects/TI4_SpreadsheetUpdate>
+-- ############################################################################

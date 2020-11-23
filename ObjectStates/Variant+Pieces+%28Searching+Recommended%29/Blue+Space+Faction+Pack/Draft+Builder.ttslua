@@ -1,0 +1,104 @@
+function onLoad()
+    createInputs()
+end
+
+function createInputs()
+    self.createButton({
+        click_function = "dobags",
+        function_owner = self,
+        label          = "Build\nBags",
+        position       = {x=0, y=0.1, z=0},
+        rotation       = {0,180,0},
+        width          = 400,
+        height         = 200,
+        font_size      = 75,
+    })
+end
+
+function dobags()
+    initializeVariables()
+    createBagsForUse()
+    distributeDraft()
+    destroyObject(cardtempBag)
+    destroyObject(slicetempBag)
+    getObjectFromGUID("6977be").putObject(self)
+end
+
+function initializeVariables()
+    basebag = getObjectFromGUID("1c711e")
+    draftBag =  getObjectFromGUID("4bb024")
+    Slice = {}
+end
+
+function createBagsForUse()
+    yellowBag = basebag.clone({['position'] = {4,3,-6} })
+    yellowBag.setColorTint(stringColorToRGB("Yellow"))
+    redBag = basebag.clone({['position'] = {0,3,-6} })
+    redBag.setColorTint(stringColorToRGB("Red"))
+    greenBag = basebag.clone({['position'] = {-4,3,-6} })
+    greenBag.setColorTint(stringColorToRGB("Green"))
+    purpleBag = basebag.clone({['position'] = {4,3,6} })
+    purpleBag.setColorTint(stringColorToRGB("Purple"))
+    blueBag = basebag.clone({['position'] = {0,3,6} })
+    blueBag.setColorTint(stringColorToRGB("Blue"))  
+    whiteBag = basebag.clone({['position'] = {-4,3,6} })
+    whiteBag.setColorTint(stringColorToRGB("White"))
+    cardtempBag = basebag.clone({['position'] = {8,3,0} })
+    cardtempBag.setColorTint(stringColorToRGB("Brown"))
+    slicetempBag = basebag.clone({['position'] = {-8,3,0} })
+    slicetempBag.setColorTint(stringColorToRGB("Brown"))
+end
+
+function distributeDraft()
+    -- separate and shuffle slice tokens
+    Slice.guid = "155a78"
+    slicetempBag.putObject(draftBag.takeObject(Slice))
+    Slice.guid = "ce8478"
+    slicetempBag.putObject(draftBag.takeObject(Slice))
+    Slice.guid = "6e0094"
+    slicetempBag.putObject(draftBag.takeObject(Slice))
+    Slice.guid = "cdb385"
+    slicetempBag.putObject(draftBag.takeObject(Slice))
+    Slice.guid = "084391"
+    slicetempBag.putObject(draftBag.takeObject(Slice))
+    Slice.guid = "78ab1b"
+    slicetempBag.putObject(draftBag.takeObject(Slice))
+    slicetempBag.shuffle()
+
+    -- fill card draft bag with cards
+    draftBag.shuffle()
+    for i=1, 18, 1 do
+      draftCard = draftBag.takeObject()
+      cardtempBag.putObject(draftCard)
+    end
+
+    -- distribute cards at random
+    cardtempBag.shuffle()
+    yellowBag.putObject(cardtempBag.takeObject())
+    yellowBag.putObject(cardtempBag.takeObject())
+    yellowBag.putObject(cardtempBag.takeObject())
+    redBag.putObject(cardtempBag.takeObject())
+    redBag.putObject(cardtempBag.takeObject())
+    redBag.putObject(cardtempBag.takeObject())
+    greenBag.putObject(cardtempBag.takeObject())
+    greenBag.putObject(cardtempBag.takeObject())
+    greenBag.putObject(cardtempBag.takeObject())
+    purpleBag.putObject(cardtempBag.takeObject())
+    purpleBag.putObject(cardtempBag.takeObject())
+    purpleBag.putObject(cardtempBag.takeObject())
+    blueBag.putObject(cardtempBag.takeObject())
+    blueBag.putObject(cardtempBag.takeObject())
+    blueBag.putObject(cardtempBag.takeObject())
+    whiteBag.putObject(cardtempBag.takeObject())
+    whiteBag.putObject(cardtempBag.takeObject())
+    whiteBag.putObject(cardtempBag.takeObject())
+
+    -- distribute slices at random
+    slicetempBag.shuffle()
+    yellowBag.putObject(slicetempBag.takeObject())
+    redBag.putObject(slicetempBag.takeObject())
+    greenBag.putObject(slicetempBag.takeObject())
+    purpleBag.putObject(slicetempBag.takeObject())
+    blueBag.putObject(slicetempBag.takeObject())
+    whiteBag.putObject(slicetempBag.takeObject())
+end
