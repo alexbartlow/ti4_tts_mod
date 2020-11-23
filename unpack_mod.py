@@ -17,6 +17,7 @@ def unpack_dict(my_dict, path):
 
         with io.open(os.path.join(os.getcwd(), *path) + ".ttslua", "w", encoding='utf-8') as out:
             out.write(re.sub('\r\n', '\n', my_dict['LuaScript']))
+        my_dict['LuaScript'] = '#include %s' % os.path.join('.', *path) + '.ttslua'
 
     if 'ContainedObjects' in my_dict:
         unpack_array(my_dict['ContainedObjects'], path)
@@ -41,3 +42,6 @@ with io.open("base_mod.json", 'r', encoding='utf-8') as f:
     cwd = __file__
     path = ["ObjectStates"]
     unpack(data["ObjectStates"], path)
+
+    with io.open("mod_with_includes.json", 'w') as json_file:
+        json.dump(data, json_file, indent=4)
